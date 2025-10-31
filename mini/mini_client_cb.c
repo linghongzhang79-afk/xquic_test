@@ -224,10 +224,10 @@ xqc_mini_cli_h3_request_write_notify(xqc_h3_request_t *h3_request, void *h3s_use
 {
     int ret = 0;
     xqc_mini_cli_user_stream_t *user_stream = (xqc_mini_cli_user_stream_t *)h3s_user_data;
-
+    
     ret = xqc_mini_cli_request_send(h3_request, user_stream);
     
-    printf("[stats] finish h3 request write notify!:%"PRIu64"\n", xqc_h3_stream_id(h3_request));
+    //printf("[stats] finish h3 request write notify!:%"PRIu64"\n", xqc_h3_stream_id(h3_request));
     
     return ret;
 }
@@ -255,20 +255,35 @@ ssize_t
 xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     const struct sockaddr *peer_addr, socklen_t peer_addrlen, void *conn_user_data)
 {
-    int fd;
-    ssize_t res;
+    int fd = -1;
+    ssize_t res = 0;
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)conn_user_data;
     
-    fd = user_conn->fd;
-    res = 0;
+    xqc_mini_cli_user_path_t *user_path = NULL;
     
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        if (user_conn->paths[i].is_active && user_conn->paths[i].path_id == path_id) {
+            user_path = &user_conn->paths[i];
+            break;
+        }
+    }
+
+    if (user_path == NULL) {
+        user_path = &user_conn->paths[0];
+    }
+
+    if (user_path == NULL || !user_path->is_active || user_path->fd < 0) {
+        return -1;
+    }
+
+    fd = user_path->fd;
+
     do {
         set_sys_errno(0);
         res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
         if (res < 0) {
-            printf("xqc_mini_cli_write_socket err %zd %s, fd: %d, buf: %p, size: %zu, "
-                "server_addr: %s\n", res, strerror(get_sys_errno()), fd, buf, size,
-                user_conn->peer_addr->sa_data);
+             printf("xqc_mini_cli_write_socket err %zd %s, fd: %d, path_id: %"PRIu64", address_path: %s\n",
+                res, strerror(get_sys_errno()), fd, user_path->path_id,inet_ntoa(((struct sockaddr_in*)user_path->local_addr)->sin_addr));
             if (get_sys_errno() == EAGAIN) {
                 res = XQC_SOCKET_EAGAIN;
             }
@@ -276,6 +291,10 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     } while ((res < 0) && (get_sys_errno() == EINTR));
 
     // printf("[report] xqc_mini_cli_write_socket_ex success size=%lu\n", size);
+    if (res >= 0) {
+        user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
+    }
+
 
     return res;
 }

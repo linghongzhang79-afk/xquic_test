@@ -22,8 +22,11 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <getopt.h>
 #endif
 
 
@@ -32,7 +35,7 @@
 #include "mini_client_cb.h"
 
 
-#define DEFAULT_IP   "127.0.0.1"
+#define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
 #define DEFAULT_HOST "test.xquic.com"
 
@@ -41,6 +44,8 @@
 #define TOKEN_MAX_SIZE 8192
 #define MAX_PATH_CNT 2
 #define XQC_PACKET_BUF_LEN 1500
+#define XQC_MINI_PATH_ID_INVALID ((uint64_t)-1)
+#define XQC_MINI_INTERFACE_NAME_MAX_LEN 64
 
 #define SESSION_TICKET_FILE         "session_ticket"
 #define TRANSPORT_PARAMS_FILE       "transport_params"
@@ -59,6 +64,9 @@
 typedef struct xqc_mini_cli_net_config_s {
     int                 conn_timeout;
     xqc_usec_t          last_socket_time;
+
+    int                 multi_interface_cnt;
+    char                multi_interface[MAX_PATH_CNT][XQC_MINI_INTERFACE_NAME_MAX_LEN];
 
     // /* server addr info */
     // struct sockaddr    *addr;
@@ -161,6 +169,23 @@ typedef struct xqc_mini_cli_ctx_s {
     int                 keylog_fd;
 } xqc_mini_cli_ctx_t;
 
+struct xqc_mini_cli_user_conn_s;
+
+typedef struct xqc_mini_cli_user_path_s {
+    struct xqc_mini_cli_user_conn_s *user_conn;
+    int                     fd;
+    int                     get_local_addr;
+    int                     is_active;
+    int                     prepared;
+    uint64_t                path_id;
+    struct sockaddr        *local_addr;
+    socklen_t               local_addrlen;
+    struct sockaddr        *peer_addr;
+    socklen_t               peer_addrlen;
+
+    struct event            *ev_socket;
+    char                    interface_name[XQC_MINI_INTERFACE_NAME_MAX_LEN];
+} xqc_mini_cli_user_path_t;
 
 typedef struct xqc_mini_cli_user_conn_s {
     xqc_cid_t               cid;
@@ -168,15 +193,10 @@ typedef struct xqc_mini_cli_user_conn_s {
 
     xqc_mini_cli_ctx_t     *ctx;
 
-    /* ipv4 server */
-    int                     fd;
-    int                     get_local_addr;
-    struct sockaddr        *local_addr;
-    socklen_t               local_addrlen;
-    struct sockaddr        *peer_addr;
-    socklen_t               peer_addrlen;
+    xqc_mini_cli_user_path_t paths[MAX_PATH_CNT];
+    int                     total_path_cnt;
+    int                     active_path_cnt;
 
-    struct event            *ev_socket;
     struct event            *ev_timeout;
 
 } xqc_mini_cli_user_conn_t;
@@ -184,9 +204,13 @@ typedef struct xqc_mini_cli_user_conn_s {
 typedef struct xqc_mini_cli_user_stream_s {
     xqc_mini_cli_user_conn_t   *user_conn;
 
+    /* send file*/
+    FILE                  *send_body_fp;
+    unsigned char          *send_buffer;
+    size_t                 total_sent;
+    size_t                 file_size;
     /* save file */
-    // char                        file_name[RESOURCE_LEN];
-    // FILE                        *recv_body_fp;
+    FILE                        *recv_body_fp;
 
     /* stat for IO */
     size_t                      send_body_len;
@@ -238,17 +262,17 @@ void xqc_mini_cli_init_0rtt(xqc_mini_cli_args_t *args);
 
 void xqc_mini_cli_init_conn_ssl_config(xqc_conn_ssl_config_t *conn_ssl_config, xqc_mini_cli_args_t *args);
 
-int xqc_mini_cli_format_h3_req(xqc_http_header_t *headers, xqc_mini_cli_req_config_t* req_cfg);
+int xqc_mini_cli_format_h3_req(xqc_http_header_t *headers, xqc_mini_cli_req_config_t* req_cfg,size_t body_len);
 
 int xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream_t *user_stream);
 
 int xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_stream_t *user_stream);
 
-int xqc_mini_cli_init_socket(xqc_mini_cli_user_conn_t *user_conn);
+int xqc_mini_cli_init_socket(xqc_mini_cli_user_path_t *user_path);
 
-void xqc_mini_cli_socket_write_handler(xqc_mini_cli_user_conn_t *user_conn, int fd);
+void xqc_mini_cli_socket_write_handler(xqc_mini_cli_user_path_t *user_path, int fd);
 
-void xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_conn_t *user_conn, int fd);
+void xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_path_t *user_path, int fd);
 
 static void xqc_mini_cli_socket_event_callback(int fd, short what, void *arg);
 int xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn);
