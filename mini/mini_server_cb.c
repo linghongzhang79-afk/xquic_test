@@ -281,15 +281,17 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
 {
     DEBUG;
     int ret;
-    char recv_buff[4096] = {0};
+    char recv_buff[16384] = {0};
     ssize_t recv_buff_size, read, read_sum;
     unsigned char fin = 0;
     xqc_http_headers_t *headers = NULL;
     xqc_mini_svr_user_stream_t *user_stream = (xqc_mini_svr_user_stream_t *)strm_user_data;
 
     read = read_sum = 0;
-    recv_buff_size = 4096;
-
+    recv_buff_size = sizeof(recv_buff);
+    
+    
+    
     /* recv headers */
     if (flag & XQC_REQ_NOTIFY_READ_HEADER) {
         headers = xqc_h3_request_recv_headers(h3_request, &fin);
@@ -297,13 +299,45 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             printf("[error] xqc_h3_request_recv_headers error\n");
             return XQC_ERROR;
         }
+        printf("========== [server] Received HTTP/3 Request Headers ==========\n");
+        for (size_t i = 0; i < headers->count; i++) {
+            xqc_http_header_t *h = &headers->headers[i];
+            printf("%.*s: %.*s\n",
+                (int)h->name.iov_len, (char*)h->name.iov_base,
+                (int)h->value.iov_len, (char*)h->value.iov_base);
+            if (h->name.iov_len == strlen("content-length") &&
+            strncasecmp((char*)h->name.iov_base, "content-length", h->name.iov_len) == 0) {
+
+            char buf[64] = {0};
+            size_t len = (h->value.iov_len < sizeof(buf)-1) ? h->value.iov_len : sizeof(buf)-1;
+            memcpy(buf, h->value.iov_base, len);
+            buf[len] = '\0';
+
+            unsigned long long content_length = strtoull(buf, NULL, 10);
+            user_stream->expected_content_length = content_length;
+
+            printf("[server] >>> Parsed Content-Length: %llu bytes\n", content_length);
+            }
+        }
+        printf("=============================================================\n");
 
         /* TODO: if recv headers once for all? */
         user_stream->header_recvd = 1;
 
-    } else if (flag & XQC_REQ_NOTIFY_READ_BODY) {   /* recv body */
+        user_stream->recv_body_fp = fopen("server_received.txt", "wb");
+        if (!user_stream->recv_body_fp) {
+            perror("fopen");
+            return XQC_ERROR;
+        }
+        printf("[server] Opened file for writing received body.\n");
+
+        gettimeofday(&user_stream->start_time, NULL);
+    } 
+    if (flag & XQC_REQ_NOTIFY_READ_BODY) {   /* recv body */
+
         do {
             read = xqc_h3_request_recv_body(h3_request, recv_buff, recv_buff_size, &fin);
+
             if (read == -XQC_EAGAIN) {
                 break;
 
@@ -311,14 +345,32 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                 printf("[error] xqc_h3_request_recv_body error %zd\n", read);
                 return XQC_OK;
             }
+            fwrite(recv_buff, 1, read, user_stream->recv_body_fp);
 
             read_sum += read;
             user_stream->recv_body_len += read;
-        } while (read > 0 && !fin);
+            //printf("[server] received chunk: %zd bytes (total: %zu)\n", read, user_stream->recv_body_len);
+        } while (read > 0);
     }
     if (fin) {
-        printf("[stats] read h3 request finish. \n");
-        xqc_mini_cli_handle_h3_request(user_stream);
+        user_stream->fin_received = 1;
+        gettimeofday(&user_stream->end_time, NULL);
+        printf("[stats] read h3 request finish. total %zu bytes\n", user_stream->recv_body_len);
+        
+    }
+    if (user_stream->fin_received &&
+        user_stream->recv_body_len >= user_stream->expected_content_length) {
+
+        fflush(user_stream->recv_body_fp);
+        fclose(user_stream->recv_body_fp);
+        xqc_mini_cli_handle_h3_request(user_stream);    
+        double duration_ms = (user_stream->end_time.tv_sec - user_stream->start_time.tv_sec) * 1000.0 +
+                         (user_stream->end_time.tv_usec - user_stream->start_time.tv_usec) / 1000.0;
+
+        double mbps = (user_stream->recv_body_len * 8.0) / (duration_ms * 1000.0); // Mbps
+
+        printf("[stats] Body finished. recv_len=%zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
+           user_stream->recv_body_len, duration_ms, mbps);
     }
     return 0;
 }

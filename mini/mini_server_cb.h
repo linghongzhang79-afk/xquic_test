@@ -22,6 +22,12 @@
 
 typedef struct xqc_mini_svr_user_stream_s {
     xqc_h3_request_t           *h3_request;
+    FILE                        *recv_body_fp;
+    size_t                       expected_content_length;
+    int                          fin_received;
+
+    struct timeval start_time;
+    struct timeval end_time;
 
     // uint64_t            send_offset;
     int                         header_sent;

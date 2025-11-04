@@ -11,14 +11,15 @@
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>
 
+
 #include "common.h"
 #include "../demo/xqc_hq.h"
 #include "../tests/platform.h"
 #include "mini_server_cb.h"
 
-#define DEFAULT_IP   "127.0.0.1"
+#define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
-#define XQC_PACKET_BUF_LEN 1500
+#define XQC_PACKET_BUF_LEN 4096
 
 /**
  * net config definition

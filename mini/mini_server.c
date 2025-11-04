@@ -17,6 +17,20 @@ xqc_mini_svr_init_ssl_config(xqc_engine_ssl_config_t  *ssl_cfg, xqc_mini_svr_arg
         ssl_cfg->session_ticket_key_data = args->quic_cfg.session_ticket_key_data;
         ssl_cfg->session_ticket_key_len = args->quic_cfg.session_ticket_key_len;
     }
+    // xqc_transport_params_t tp;
+    // memset(&tp, 0, sizeof(tp));
+
+    // // 调大流控窗口
+    // tp.initial_max_data = 2ULL * 1024 * 1024 * 1024;
+    // tp.initial_max_stream_data_bidi_local  = 2ULL * 1024 * 1024 * 1024;
+    // tp.initial_max_stream_data_bidi_remote = 2ULL * 1024 * 1024 * 1024;
+    // tp.initial_max_stream_data_uni         = 2ULL * 1024 * 1024 * 1024;
+    // tp.initial_max_streams_bidi = 16;
+    // tp.initial_max_streams_uni  = 16;
+
+    // // multipath 如果需要：
+
+    // ssl_cfg.transport_params = tp;
 }
 
 void
@@ -207,6 +221,9 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .standby_path_probe_timeout = 1000,
         .adaptive_ack_frequency = 1,
         .anti_amplification_limit = 4,
+        .recv_rate_bytes_per_sec = 0,
+        
+        .init_recv_window =  512 * 1024 * 1024,  // ✅ 2GB 接收窗口
     };
 
     /* set customized connection settings to engine ctx */
@@ -247,7 +264,7 @@ xqc_mini_svr_init_socket(int family, uint16_t port,
     }
 
     /* send/recv buffer size */
-    size = 1 * 1024 * 1024;
+    size = 16 * 1024 * 1024;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
         printf("setsockopt failed, errno: %d\n", get_sys_errno());
         goto err;
@@ -345,57 +362,77 @@ xqc_mini_svr_socket_write_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
 void
 xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
 {
-    DEBUG;
-    ssize_t recv_size, recv_sum;
-    struct sockaddr_in peer_addr = {0};
+    static size_t total_recv = 0;   // 累计接收字节数
+    ssize_t recv_size;
+    struct sockaddr_storage peer_addr;
     socklen_t peer_addrlen = sizeof(peer_addr);
-    uint64_t recv_time;
-    xqc_int_t ret;
-    unsigned char packet_buf[XQC_PACKET_BUF_LEN] = {0};
-    xqc_mini_svr_ctx_t *ctx;
+    xqc_mini_svr_ctx_t *ctx = user_conn->ctx;
 
-    ctx = user_conn->ctx;
+    // ✅ 建议把这个长度设成 8192 或更大
+    unsigned char packet_buf[XQC_PACKET_BUF_LEN];
+
     ctx->current_fd = fd;
-    recv_size = recv_sum = 0;
 
-    do {
-        /* recv quic packet from client */
+    for (;;) {
         recv_size = recvfrom(fd, packet_buf, sizeof(packet_buf), 0,
-                            (struct sockaddr *) &peer_addr, &peer_addrlen);
-        if (recv_size < 0 && get_sys_errno() == EAGAIN) {
+                             (struct sockaddr *)&peer_addr, &peer_addrlen);
+
+        if (recv_size < 0) {
+            if (get_sys_errno() == EAGAIN || get_sys_errno() == EWOULDBLOCK) {
+                break;  // 已读完
+            }
+            perror("[server recv] recvfrom error");
             break;
         }
+
+        if (recv_size == 0) {
+            // UDP 通常不会有 0 字节，这里仅作保护
+            break;
+        }
+        
+        struct sockaddr_in *pa = (struct sockaddr_in*)&peer_addr;
+         
+        char peer_ip[INET_ADDRSTRLEN];
+
+        inet_ntop(AF_INET, &pa->sin_addr, peer_ip, sizeof peer_ip);
+        //printf(">>>recv from %s: %ld bytes.\n",peer_ip,recv_size);
+
         memcpy(user_conn->peer_addr, &peer_addr, peer_addrlen);
         user_conn->peer_addrlen = peer_addrlen;
-    
-        if (recv_size < 0) {
-            printf("recvfrom: recvmsg = %zd err=%s\n", recv_size, strerror(get_sys_errno()));
-            break;
-        }
-
         user_conn->local_addrlen = sizeof(struct sockaddr_in6);
-        ret = getsockname(user_conn->fd, (struct sockaddr *)user_conn->local_addr,
-                          &user_conn->local_addrlen);
-        if (ret != 0) {
-            printf("[error] getsockname error, errno: %d\n", get_sys_errno());
-        }
-        // printf("[stats] get sock name %d\n", user_conn->local_addr->sin_family);
 
-        recv_sum += recv_size;
-        recv_time = xqc_now();
-        /* process quic packet with xquic engine */
-        ret = xqc_engine_packet_process(ctx->engine, packet_buf, recv_size,
-                                        (struct sockaddr *)(user_conn->local_addr), user_conn->local_addrlen,
-                                        (struct sockaddr *)(user_conn->peer_addr), user_conn->peer_addrlen,
-                                        (xqc_usec_t)recv_time, user_conn);
+        if (getsockname(user_conn->fd,
+                        (struct sockaddr *)user_conn->local_addr,
+                        &user_conn->local_addrlen) != 0) {
+            perror("[server recv] getsockname error");
+        }
+
+        // 🚀 核心：将 UDP 包交给 XQUIC 引擎
+        xqc_int_t ret = xqc_engine_packet_process(
+            ctx->engine,
+            packet_buf,
+            recv_size,
+            (struct sockaddr *)user_conn->local_addr,
+            user_conn->local_addrlen,
+            (struct sockaddr *)user_conn->peer_addr,
+            user_conn->peer_addrlen,
+            xqc_now(),
+            user_conn
+        );
+
         if (ret != XQC_OK) {
-            printf("[error] server_read_handler: packet process err, ret: %d\n", ret);
-            return;
+            fprintf(stderr, "[error] xqc_engine_packet_process ret=%d\n", ret);
         }
-    } while (recv_size > 0);
 
-finish_recv:
-    // printf("[stats] xqc_mini_svr_socket_read_handler, recv size:%zu\n", recv_sum);
+        total_recv += recv_size;
+        // 每 10MB 打印一次
+        if (total_recv % (10 * 1024 * 1024) < recv_size) {
+            printf("[server socket] total UDP received: %.2f MB\n",
+                   (double)total_recv / (1024 * 1024));
+        }
+    }
+
+    // ✅ 通知 QUIC 引擎本轮接收完成
     xqc_engine_finish_recv(ctx->engine);
 }
 

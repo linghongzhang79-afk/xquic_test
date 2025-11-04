@@ -209,6 +209,8 @@ typedef struct xqc_mini_cli_user_stream_s {
     unsigned char          *send_buffer;
     size_t                 total_sent;
     size_t                 file_size;
+    size_t                 buffered_len;
+    size_t                 buffered_sent;
     /* save file */
     FILE                        *recv_body_fp;
 

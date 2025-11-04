@@ -282,9 +282,20 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
         set_sys_errno(0);
         res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
         if (res < 0) {
-             printf("xqc_mini_cli_write_socket err %zd %s, fd: %d, path_id: %"PRIu64", address_path: %s\n",
-                res, strerror(get_sys_errno()), fd, user_path->path_id,inet_ntoa(((struct sockaddr_in*)user_path->local_addr)->sin_addr));
+        
+            // struct sockaddr_in *la = (struct sockaddr_in*)user_path->local_addr;
+            // struct sockaddr_in *pa = (struct sockaddr_in*)user_path->peer_addr;
+            // char local_ip[INET_ADDRSTRLEN];
+            // char peer_ip[INET_ADDRSTRLEN];
+
+            // inet_ntop(AF_INET, &la->sin_addr, local_ip, sizeof local_ip);
+            // inet_ntop(AF_INET, &pa->sin_addr, peer_ip, sizeof peer_ip);
+
+            //  printf("xqc_mini_cli_write_socket err %zd %s, fd: %d, path_id: %"PRIu64", address_path: %s,peer_address:%s\n",
+            //      res, strerror(get_sys_errno()), fd, user_path->path_id,local_ip,peer_ip);
+            
             if (get_sys_errno() == EAGAIN) {
+                //user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
                 res = XQC_SOCKET_EAGAIN;
             }
         }
@@ -383,7 +394,7 @@ xqc_mini_cli_save_tp_cb(const char * data, size_t data_len, void * user_data)
 void
 xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
 {
-    int conn_timeout, last_socket_time, ret;
+    int conn_timeout, ret;
     xqc_usec_t socket_idle_time;
     struct timeval tv;
     xqc_mini_cli_ctx_t *ctx;
@@ -392,9 +403,9 @@ xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
     user_conn = (xqc_mini_cli_user_conn_t *)arg;
     ctx = user_conn->ctx;
     conn_timeout = ctx->args->net_cfg.conn_timeout;
-    last_socket_time = ctx->args->net_cfg.last_socket_time;
+    xqc_usec_t last_socket_time = ctx->args->net_cfg.last_socket_time;
     socket_idle_time = xqc_now() - last_socket_time;
-
+    //printf("[stats] client connection idle time: %llu us, conn_timeout:%d,last_socket_time:%d\n", socket_idle_time,conn_timeout,last_socket_time);
     if (socket_idle_time < conn_timeout * 1000000) {
         tv.tv_sec = conn_timeout;
         tv.tv_usec = 0;

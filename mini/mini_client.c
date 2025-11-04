@@ -95,9 +95,11 @@ xqc_mini_cli_convert_text_to_sockaddr(int type,
     *saddr = calloc(1, sizeof(struct sockaddr_in));
     struct sockaddr_in *addr_v4 = (struct sockaddr_in *)(*saddr);
     inet_pton(type, addr_text, &(addr_v4->sin_addr.s_addr));
+    
     addr_v4->sin_family = type;
     addr_v4->sin_port = htons(port);
     *saddr_len = sizeof(struct sockaddr_in);
+    
 }
 
 void
@@ -118,7 +120,8 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->quic_cfg.ciphers, XQC_TLS_CIPHERS, CIPHER_SUIT_LEN - 1);
     strncpy(args->quic_cfg.groups, XQC_TLS_GROUPS, TLS_GROUPS_LEN - 1);
     args->quic_cfg.multipath = 1;
-    strncpy(args->quic_cfg.mp_sched, "minrtt", sizeof(args->quic_cfg.mp_sched));
+    strncpy(args->quic_cfg.mp_sched, "balanced", sizeof(args->quic_cfg.mp_sched));
+    args->quic_cfg.cc = CC_TYPE_BBR;
 
 
     /* init environmen args */
@@ -187,8 +190,14 @@ xqc_mini_cli_get_sched_cb(xqc_mini_cli_args_t *args)
     if (strncmp(args->quic_cfg.mp_sched, "minrtt", strlen("minrtt")) == 0) {
         sched = xqc_minrtt_scheduler_cb;
 
-    } if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
+    } else if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
         sched = xqc_backup_scheduler_cb;
+    }
+    else if (strncmp(args->quic_cfg.mp_sched, "balanced", strlen("balanced")) == 0) {
+        sched = xqc_balanced_scheduler_cb;
+    }
+    else if (strncmp(args->quic_cfg.mp_sched, "rap", strlen("rap")) == 0) {
+        sched = xqc_rap_scheduler_cb;
     }
     return sched;
 }
@@ -390,20 +399,45 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
     //     return -1;
     // }
     unsigned char *buffer = user_stream->send_buffer;
+    xqc_mini_cli_ctx_t *ctx = user_stream->user_conn->ctx;
     if (!buffer) {
         perror("malloc");
         return -1;
     }
-    size_t nread;
+    while (user_stream->total_sent < user_stream->file_size
+        || user_stream->buffered_sent < user_stream->buffered_len) {
+        
+         if (user_stream->buffered_sent == user_stream->buffered_len) {
+            if (fseek(user_stream->send_body_fp, user_stream->total_sent, SEEK_SET) != 0) {
+                perror("fseek");
+                return -1;
+            }
+            user_stream->buffered_len = fread(buffer, 1, CHUNK_SIZE, user_stream->send_body_fp);
+            user_stream->buffered_sent = 0;
 
-    fseek(user_stream->send_body_fp, user_stream->total_sent, SEEK_SET);
-    
+            if (user_stream->buffered_len == 0) {
+                if (feof(user_stream->send_body_fp)) {
+                    if (user_stream->total_sent < user_stream->file_size) {
+                        printf("[error] unexpected EOF after %zu/%zu bytes\n",
+                               user_stream->total_sent, user_stream->file_size);
+                        return -1;
+                    }
+                    break;
+                }
+                if (ferror(user_stream->send_body_fp)) {
+                    perror("fread");
+                    return -1;
+                }
+            }
+        }
+        
+        size_t bytes_left_in_buffer = user_stream->buffered_len - user_stream->buffered_sent;
+        int fin = (user_stream->total_sent + bytes_left_in_buffer >= user_stream->file_size) ? 1 : 0;
 
-    while ((nread = fread(buffer, 1, CHUNK_SIZE, user_stream->send_body_fp)) > 0) {
-        int fin = (user_stream->total_sent + nread >= user_stream->file_size) ? 1 : 0;
-
-        ssize_t n = xqc_h3_request_send_body(h3_request, buffer, nread, fin);
-        if (n == -610) {
+         ssize_t n = xqc_h3_request_send_body(h3_request,
+            buffer + user_stream->buffered_sent, bytes_left_in_buffer, fin);
+        if (n == -XQC_EAGAIN) {
+            //ctx->args->net_cfg.last_socket_time = xqc_now();
             //printf("[info] send paused at start, waiting for write_notify\n");
             break;
         }
@@ -411,12 +445,17 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
             printf("[error] send body failed: %zd\n", n);
             return -1;
         }
-
+        user_stream->buffered_sent += n;
         user_stream->total_sent += n;
-        //printf(">>>already sent %ld bytes, remaining %ld bytes to send.\n",user_stream->total_sent, user_stream->file_size - user_stream->total_sent);
+
+        printf(">>>already sent %ld bytes, remaining %ld bytes to send.\n",user_stream->total_sent, user_stream->file_size - user_stream->total_sent);
+        ctx->args->net_cfg.last_socket_time = xqc_now();
         xqc_engine_main_logic(user_stream->user_conn->ctx->engine);
 
-        
+        if (user_stream->buffered_sent < user_stream->buffered_len) {
+            continue;
+        }
+
         if (fin) {
             printf("[info] total file sent: %zu bytes\n", user_stream->total_sent);
             break;
@@ -485,6 +524,8 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
         return XQC_OK;
     }
     user_stream->send_buffer = malloc(CHUNK_SIZE);
+    user_stream->buffered_len = 0;
+    user_stream->buffered_sent = 0;
 
     xqc_mini_cli_request_send(user_stream->h3_request, user_stream);
 
@@ -511,19 +552,18 @@ xqc_mini_cli_get_interface_for_path(xqc_mini_cli_user_conn_t *user_conn, int pat
 static int
 xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn)
 {
+
     int target = user_conn->ctx->args->net_cfg.multi_interface_cnt;
     if (target <= 0) {
-        target = MAX_PATH_CNT;
+        return MAX_PATH_CNT;
     }
 
     if (target > MAX_PATH_CNT) {
         target = MAX_PATH_CNT;
     }
-
-    if (target < 1) {
+    if(target < 1) {
         target = 1;
     }
-
     return target;
 }
 
@@ -546,7 +586,7 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
     xqc_mini_cli_ctx_t *ctx = user_conn->ctx;
     int path_index = (int)(path - user_conn->paths);
     const char *interface_name = xqc_mini_cli_get_interface_for_path(user_conn, path_index);
-
+    
     if (path->prepared) {
         return XQC_OK;
     }
@@ -573,23 +613,24 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
     }
 
     if (path->local_addr == NULL) {
-        path->local_addr = (struct sockaddr *)calloc(1, sizeof(struct sockaddr_storage));
+        path->local_addr = (struct sockaddr *)calloc(1, sizeof(struct sockaddr_in));
         if (path->local_addr == NULL) {
             return XQC_ERROR;
         }
     } else {
-        memset(path->local_addr, 0, sizeof(struct sockaddr_storage));
+        memset(path->local_addr, 0, sizeof(struct sockaddr_in));
     }
 
     if (xqc_mini_cli_set_local_addr(path) != XQC_OK) {
         printf("[warn] set local address for path[%d] failed, fallback to wildcard\n", path_index);
     }
-
     if (path->peer_addr == NULL) {
         xqc_mini_cli_convert_text_to_sockaddr(AF_INET, DEFAULT_IP, DEFAULT_PORT,
             &(path->peer_addr), &(path->peer_addrlen));
-    }
 
+        
+    }
+    
     ret = xqc_mini_cli_init_socket(path);
     if (ret != XQC_OK) {
         return ret;
@@ -611,6 +652,7 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
     } else {
         printf("[stats] path[%d] prepared on fd %d (inactive)\n", path_index, path->fd);
     }
+    
 
     return XQC_OK;
 }
@@ -672,7 +714,10 @@ xqc_mini_cli_init_socket(xqc_mini_cli_user_path_t *user_path)
         printf("[error] create socket failed, errno: %d\n", get_sys_errno());
         return XQC_ERROR;
     }
-
+    if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
+                   interface_name, strlen(interface_name)) < 0) {
+        perror("SO_BINDTODEVICE");
+    }
 #ifdef XQC_SYS_WINDOWS
     if (ioctlsocket(fd, FIONBIO, &flags) == SOCKET_ERROR) {
 		goto err;
@@ -684,7 +729,7 @@ xqc_mini_cli_init_socket(xqc_mini_cli_user_path_t *user_path)
     }
 #endif
 
-    size = 1 * 1024 * 1024;
+    size = 16 * 1024 * 1024;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
         printf("[error] setsockopt failed, errno: %d\n", get_sys_errno());
         goto err;
@@ -699,17 +744,6 @@ xqc_mini_cli_init_socket(xqc_mini_cli_user_path_t *user_path)
     int val = IP_PMTUDISC_DO;
     setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &val, sizeof(val));
 #endif
-
-    if (interface_name && interface_name[0] != '\0') {
-        if (xqc_mini_cli_bind_to_interface(fd, interface_name, addr->sa_family) != XQC_OK) {
-            printf("[error] SO_BINDTODEVICE %s failed, fallback may use default route\n", interface_name);
-            /* 可选：这里也可以直接 goto err; */
-        } else {
-            printf("[stats] fd %d bound to interface %s\n", fd, interface_name);
-        }
-    }
-
-    /* 再按该 path 的本地地址 bind（该地址已由接口采集得到）*/
     if (user_path->local_addrlen > 0) {
         if (bind(fd, (struct sockaddr *)user_path->local_addr, user_path->local_addrlen) < 0) {
             printf("[error] bind local address failed, errno: %d\n", get_sys_errno());
@@ -759,7 +793,8 @@ xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_path_t *user_path, int fd)
     do {
         /* recv quic packet from server */
         recv_size = recvfrom(fd, packet_buf, sizeof(packet_buf), 0,
-                             user_path->peer_addr, &user_path->peer_addrlen);
+                             NULL, NULL);
+        
         if (recv_size < 0 && get_sys_errno() == EAGAIN) {
             break;
         }
@@ -821,6 +856,7 @@ xqc_mini_cli_socket_event_callback(int fd, short what, void *arg)
 int
 xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
 {
+    
     xqc_conn_ssl_config_t conn_ssl_config = {0};
     xqc_conn_settings_t conn_settings = {0};
     xqc_mini_cli_ctx_t *ctx;
@@ -839,6 +875,7 @@ xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
     xqc_mini_cli_init_conn_ssl_config(&conn_ssl_config, ctx->args);
 
     xqc_mini_cli_user_path_t *path = &user_conn->paths[0];
+    
 
     /* build connection */
     const xqc_cid_t *cid = xqc_h3_connect(ctx->engine, &conn_settings, args->quic_cfg.token,
@@ -849,7 +886,7 @@ xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
     }
     memcpy(&user_conn->cid, cid, sizeof(xqc_cid_t));
     printf("[stats] init xquic connection success \n");
-
+    
     return XQC_OK;
 }
 
@@ -1012,7 +1049,9 @@ xqc_mini_cli_init_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_us
     uint64_t path_id)
 {
     int path_index = (int)(path - user_conn->paths);
+    
     int ret = xqc_mini_cli_prepare_user_path(user_conn, path);
+    
     if (ret != XQC_OK) {
         return ret;
     }
@@ -1179,8 +1218,12 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->ev_timeout = event_new(ctx->eb, -1, 0, xqc_mini_cli_timeout_callback, user_conn);
     event_add(user_conn->ev_timeout, &tv);
 
+    
     xqc_mini_cli_user_path_t *path0 = &user_conn->paths[0];
+    
     ret = xqc_mini_cli_init_user_path(user_conn, path0, 0);
+    // printf("path_id: %"PRIu64", address_path: %s,peer_address:%s\n",
+    //            path0->path_id,inet_ntoa(((struct sockaddr_in*)path0->local_addr)->sin_addr),inet_ntoa(((struct sockaddr_in*)path0->peer_addr)->sin_addr));
     if (ret < 0) {
         printf("[error] mini socket init socket failed\n");
         xqc_mini_cli_free_user_conn(user_conn);
