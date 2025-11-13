@@ -150,10 +150,29 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     xqc_mini_cli_ctx_t *conn_ctx = user_conn->ctx;
     xqc_request_stats_t stats = xqc_h3_request_get_stats(h3_request);
 
-    xqc_h3_conn_close(conn_ctx->engine, &user_conn->cid);
+    if (user_stream->send_body_fp) {
+        fclose(user_stream->send_body_fp);
+        user_stream->send_body_fp = NULL;
+    }
+    if (user_stream->recv_body_fp) {
+        fclose(user_stream->recv_body_fp);
+        user_stream->recv_body_fp = NULL;
+    }
+    free(user_stream->send_buffer);
+    user_stream->send_buffer = NULL;
+
+    user_conn->completed_requests++;
+    printf("[stats] stream %d close notify, completed %d/%d, cwnd_blocked:%"PRIu64"\n",
+        user_stream->stream_index, user_conn->completed_requests,
+        user_conn->target_requests, stats.cwnd_blocked_ms);
+
+    if (user_conn->completed_requests >= user_conn->target_requests) {
+        xqc_h3_conn_close(conn_ctx->engine, &user_conn->cid);
+    }
+
     free(user_stream);
 
-    printf("[stats] xqc_mini_cli_h3_request_close_notify success, cwnd_blocked:%"PRIu64"\n", stats.cwnd_blocked_ms);
+    //printf("[stats] xqc_mini_cli_h3_request_close_notify success, cwnd_blocked:%"PRIu64"\n", stats.cwnd_blocked_ms);
     return 0;
 }
 int

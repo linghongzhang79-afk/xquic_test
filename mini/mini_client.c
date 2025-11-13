@@ -1,9 +1,10 @@
 #include "mini_client.h"
 #include <inttypes.h>
+#include <stdint.h>
 #include <netdb.h>
 
 #define CHUNK_SIZE (4 * 1024)
-
+#define CLIENT_SEND_FILE "client_sent.txt"
 
 static void xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data);
 static void xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data);
@@ -18,6 +19,56 @@ static int xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path);
 static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen,
     char *buf, size_t buflen);
 
+
+static void
+xqc_mini_cli_compute_stream_segment(const xqc_mini_cli_user_conn_t *user_conn,
+    int stream_index, size_t *offset, size_t *length)
+{
+    size_t total_size = user_conn->send_file_size;
+    int stream_total = user_conn->target_requests;
+
+    if (stream_total <= 0) {
+        if (offset) {
+            *offset = 0;
+        }
+        if (length) {
+            *length = 0;
+        }
+        return;
+    }
+
+    if (stream_index >= stream_total) {
+        if (offset) {
+            *offset = total_size;
+        }
+        if (length) {
+            *length = 0;
+        }
+        return;
+    }
+
+    size_t base = stream_total > 0 ? total_size / (size_t)stream_total : 0;
+    size_t remainder = stream_total > 0 ? total_size % (size_t)stream_total : 0;
+
+    size_t start = base * (size_t)stream_index;
+    if (stream_index < (int)remainder) {
+        start += (size_t)stream_index;
+    } else {
+        start += remainder;
+    }
+
+    size_t len = base;
+    if (stream_index < (int)remainder) {
+        len += 1;
+    }
+
+    if (offset) {
+        *offset = start;
+    }
+    if (length) {
+        *length = len;
+    }
+}
 //引擎的ssl配置：这里应该是加密所使用算法和组别
 void
 xqc_mini_cli_init_engine_ssl_config(xqc_engine_ssl_config_t *ssl_cfg, xqc_mini_cli_args_t *args)
@@ -111,6 +162,9 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         memset(args->net_cfg.multi_interface[i], 0, sizeof(args->net_cfg.multi_interface[i]));
     }
+    strncpy(args->net_cfg.server_addr, DEFAULT_IP, sizeof(args->net_cfg.server_addr) - 1);
+    args->net_cfg.server_addr[sizeof(args->net_cfg.server_addr) - 1] = '\0';
+    args->net_cfg.server_port = DEFAULT_PORT;
     /**
      * init quic config
      * it's recommended to replace the constant value with option arguments according to actual needs
@@ -139,6 +193,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->req_cfg.scheme, "https", sizeof(args->req_cfg.scheme));
     strncpy(args->req_cfg.url, "/", sizeof(args->req_cfg.url));
     strncpy(args->req_cfg.host, DEFAULT_HOST, sizeof(args->req_cfg.host));
+    args->req_stream_cnt = 1;
 }
 
 int
@@ -328,15 +383,31 @@ xqc_mini_cli_init_conn_ssl_config(xqc_conn_ssl_config_t *conn_ssl_config, xqc_mi
         conn_ssl_config->transport_parameter_data_len = args->quic_cfg.transport_parameter_len;
     }
 }
-
-int
-xqc_mini_cli_format_h3_req(xqc_http_header_t *headers, xqc_mini_cli_req_config_t* req_cfg,size_t body_len)
+int 
+xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
+    xqc_mini_cli_req_config_t* req_cfg, size_t body_len,
+    xqc_mini_cli_user_stream_t *user_stream)
 {
     /* response header buf list */
     
-    static char content_length_buf[32];
-    snprintf(content_length_buf, 32, "%zu", body_len);
-    printf(">>>send_body_total_size:%s\n",content_length_buf);
+    if (user_stream == NULL || user_stream->user_conn == NULL) {
+        printf("[error] invalid user_stream for header formatting\n");
+        return XQC_ERROR;
+    }
+    snprintf(user_stream->header_content_length,
+        sizeof(user_stream->header_content_length), "%zu", body_len);
+    snprintf(user_stream->header_stream_index,
+        sizeof(user_stream->header_stream_index), "%d", user_stream->stream_index);
+    snprintf(user_stream->header_stream_count,
+        sizeof(user_stream->header_stream_count), "%d",
+        user_stream->user_conn->target_requests);
+    snprintf(user_stream->header_stream_offset,
+        sizeof(user_stream->header_stream_offset), "%zu", user_stream->chunk_offset);
+    snprintf(user_stream->header_total_size,
+        sizeof(user_stream->header_total_size), "%zu",
+        user_stream->user_conn->send_file_size);
+
+    printf(">>>send_body_total_size:%s\n", user_stream->header_content_length);
 
     xqc_http_header_t req_hdr[] = {
         {
@@ -366,8 +437,33 @@ xqc_mini_cli_format_h3_req(xqc_http_header_t *headers, xqc_mini_cli_req_config_t
         },
         {
             .name   = {.iov_base = "content-length", .iov_len = 14},
-            .value  = {.iov_base = content_length_buf, .iov_len = strlen(content_length_buf)},
+            .value  = {.iov_base = user_stream->header_content_length,
+                .iov_len = strlen(user_stream->header_content_length)},
             .flags  = 0,
+        },
+        {
+            .name = {.iov_base = "x-stream-index", .iov_len = strlen("x-stream-index")},
+            .value = {.iov_base = user_stream->header_stream_index,
+                .iov_len = strlen(user_stream->header_stream_index)},
+            .flags = 0,
+        },
+        {
+            .name = {.iov_base = "x-stream-count", .iov_len = strlen("x-stream-count")},
+            .value = {.iov_base = user_stream->header_stream_count,
+                .iov_len = strlen(user_stream->header_stream_count)},
+            .flags = 0,
+        },
+        {
+            .name = {.iov_base = "x-stream-offset", .iov_len = strlen("x-stream-offset")},
+            .value = {.iov_base = user_stream->header_stream_offset,
+                .iov_len = strlen(user_stream->header_stream_offset)},
+            .flags = 0,
+        },
+        {
+            .name = {.iov_base = "x-total-length", .iov_len = strlen("x-total-length")},
+            .value = {.iov_base = user_stream->header_total_size,
+                .iov_len = strlen(user_stream->header_total_size)},
+            .flags = 0,
         },
     };
 
@@ -400,6 +496,16 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
     // }
     unsigned char *buffer = user_stream->send_buffer;
     xqc_mini_cli_ctx_t *ctx = user_stream->user_conn->ctx;
+    if (user_stream->file_size == 0) {
+        ssize_t n = xqc_h3_request_send_body(h3_request, NULL, 0, 1);
+        if (n < 0) {
+            printf("[error] send zero-length body failed: %zd\n", n);
+            return -1;
+        }
+        printf("[stream %d] zero-length segment sent, offset %zu\n",
+            user_stream->stream_index, user_stream->chunk_offset);
+        return XQC_OK;
+    }
     if (!buffer) {
         perror("malloc");
         return -1;
@@ -408,9 +514,17 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         || user_stream->buffered_sent < user_stream->buffered_len) {
         
          if (user_stream->buffered_sent == user_stream->buffered_len) {
-            if (fseek(user_stream->send_body_fp, user_stream->total_sent, SEEK_SET) != 0) {
+            if (fseek(user_stream->send_body_fp,
+                    (long)(user_stream->chunk_offset + user_stream->total_sent), SEEK_SET) != 0) {
                 perror("fseek");
                 return -1;
+            }
+            
+            size_t remaining = user_stream->file_size - user_stream->total_sent;
+            size_t chunk = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+
+            if (chunk == 0) {
+                break;
             }
             user_stream->buffered_len = fread(buffer, 1, CHUNK_SIZE, user_stream->send_body_fp);
             user_stream->buffered_sent = 0;
@@ -448,7 +562,11 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         user_stream->buffered_sent += n;
         user_stream->total_sent += n;
 
-        printf(">>>already sent %ld bytes, remaining %ld bytes to send.\n",user_stream->total_sent, user_stream->file_size - user_stream->total_sent);
+        printf("[stream %d] sent %zu/%zu bytes from offset %zu.\n",
+            user_stream->stream_index,
+            user_stream->total_sent,
+            user_stream->file_size,
+            user_stream->chunk_offset);
         ctx->args->net_cfg.last_socket_time = xqc_now();
         xqc_engine_main_logic(user_stream->user_conn->ctx->engine);
 
@@ -457,7 +575,9 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         }
 
         if (fin) {
-            printf("[info] total file sent: %zu bytes\n", user_stream->total_sent);
+            printf("[stream %d] segment complete: %zu bytes at offset %zu\n",
+                user_stream->stream_index, user_stream->total_sent,
+                user_stream->chunk_offset);
             break;
         }
     }
@@ -466,9 +586,15 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
 }
 
 int
-xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_stream_t *user_stream)
+xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_stream_t *user_stream, int stream_index)
 {
     user_stream->user_conn = user_conn;
+    user_stream->stream_index = stream_index;
+    size_t chunk_offset = 0;
+    size_t chunk_length = 0;
+    xqc_mini_cli_compute_stream_segment(user_conn, stream_index, &chunk_offset, &chunk_length);
+    user_stream->chunk_offset = chunk_offset;
+    user_stream->file_size = chunk_length;
 
     xqc_stream_settings_t settings = { .recv_rate_bytes_per_sec = 0 };
     user_stream->h3_request = xqc_h3_request_create(user_conn->ctx->engine, &user_conn->cid,
@@ -487,22 +613,19 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     // POST body
     // const char *body = "{\"name\":\"docker\",\"type\":\"client\"}";
     // size_t body_len = strlen(body);
-    FILE *fp = fopen("client_sent.txt","rb");
-    
+    FILE *fp = fopen(user_conn->send_file_path, "rb");
+    //fin = 1;
     if(!fp ){
         perror("fopen");
         return -1;
     }
-
     user_stream->send_body_fp = fp;
     user_stream->total_sent =0;
-    fseek(fp, 0, SEEK_END);
-    size_t file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    user_stream->file_size = file_size;
-    printf(">>>send_file_size:%ld",file_size);
-    //fin = 1;
-    ret = xqc_mini_cli_format_h3_req(header, req_cfg,file_size);
+    printf("[stream %d] segment offset=%zu length=%zu of total %zu bytes\n",
+        stream_index, user_stream->chunk_offset, user_stream->file_size,
+        user_conn->send_file_size);
+
+    ret = xqc_mini_cli_format_h3_req(header, req_cfg, user_stream->file_size, user_stream);
     if (ret > 0) {
         user_stream->h3_hdrs.headers = header;
         user_stream->h3_hdrs.count = ret;
@@ -523,7 +646,13 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     if (req_cfg->method == REQUEST_METHOD_GET) {
         return XQC_OK;
     }
-    user_stream->send_buffer = malloc(CHUNK_SIZE);
+    if (user_stream->file_size > 0) {
+        user_stream->send_buffer = malloc(CHUNK_SIZE);
+        if (user_stream->send_buffer == NULL) {
+            perror("malloc");
+            return -1;
+        }
+    }
     user_stream->buffered_len = 0;
     user_stream->buffered_sent = 0;
 
@@ -624,12 +753,14 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
     if (xqc_mini_cli_set_local_addr(path) != XQC_OK) {
         printf("[warn] set local address for path[%d] failed, fallback to wildcard\n", path_index);
     }
-    if (path->peer_addr == NULL) {
-        xqc_mini_cli_convert_text_to_sockaddr(AF_INET, DEFAULT_IP, DEFAULT_PORT,
-            &(path->peer_addr), &(path->peer_addrlen));
-
-        
+    if (path->peer_addr != NULL) {
+        free(path->peer_addr);
+        path->peer_addr = NULL;
+        path->peer_addrlen = 0;
     }
+    
+    xqc_mini_cli_convert_text_to_sockaddr(AF_INET, ctx->args->net_cfg.server_addr,
+        ctx->args->net_cfg.server_port, &(path->peer_addr), &(path->peer_addrlen));
     
     ret = xqc_mini_cli_init_socket(path);
     if (ret != XQC_OK) {
@@ -1187,10 +1318,24 @@ xqc_mini_cli_main_process(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_ctx_
         return XQC_ERROR;
     }
 
-    xqc_mini_cli_user_stream_t *user_stream = calloc(1, sizeof(xqc_mini_cli_user_stream_t));
-    ret = xqc_mini_cli_send_h3_req(user_conn, user_stream);
-    if (ret < 0) {
-        return XQC_ERROR;
+    int stream_total = user_conn->target_requests;
+    printf("[stats] launch %d concurrent request streams\n", stream_total);
+    
+    
+
+    for (int i = 0; i < stream_total; i++) {
+        xqc_mini_cli_user_stream_t *user_stream = calloc(1, sizeof(xqc_mini_cli_user_stream_t));
+
+        if (user_stream == NULL) {
+            printf("[error] calloc user_stream failed for stream %d\n", i);
+            return XQC_ERROR;
+        }
+        
+        ret = xqc_mini_cli_send_h3_req(user_conn, user_stream, i);
+        if (ret < 0) {
+            free(user_stream);
+            return XQC_ERROR;
+        }
     }
 
     return XQC_OK;
@@ -1232,6 +1377,61 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
 
     user_conn->total_path_cnt = 1;
     user_conn->active_path_cnt = 1;
+
+    strncpy(user_conn->send_file_path, CLIENT_SEND_FILE,
+        sizeof(user_conn->send_file_path) - 1);
+    FILE *send_fp = fopen(user_conn->send_file_path, "rb");
+    if (send_fp == NULL) {
+        perror("fopen");
+        printf("[error] failed to open send file '%s'\n", user_conn->send_file_path);
+        xqc_mini_cli_free_user_conn(user_conn);
+        return NULL;
+    }
+    if (fseek(send_fp, 0, SEEK_END) != 0) {
+        perror("fseek");
+        fclose(send_fp);
+        xqc_mini_cli_free_user_conn(user_conn);
+        return NULL;
+    }
+    long file_length = ftell(send_fp);
+    if (file_length < 0) {
+        perror("ftell");
+        fclose(send_fp);
+        xqc_mini_cli_free_user_conn(user_conn);
+        return NULL;
+    }
+    user_conn->send_file_size = (size_t)file_length;
+    rewind(send_fp);
+    fclose(send_fp);
+
+    printf("[stats] source file '%s' size=%zu bytes\n",
+        user_conn->send_file_path, user_conn->send_file_size);
+
+    int stream_target = ctx->args->req_stream_cnt;
+    if (stream_target <= 0) {
+        stream_target = 1;
+    }
+    if (stream_target > XQC_MINI_MAX_STREAMS) {
+        printf("[warn] exceed max stream count %d, clamp to limit\n", XQC_MINI_MAX_STREAMS);
+        stream_target = XQC_MINI_MAX_STREAMS;
+    }
+    if (user_conn->send_file_size == 0 && stream_target != 1) {
+        printf("[warn] send file is empty, forcing single stream\n");
+        stream_target = 1;
+    }
+    if (user_conn->send_file_size > 0
+        && (size_t)stream_target > user_conn->send_file_size) {
+        printf("[warn] stream count %d exceeds file bytes %zu, clamp\n",
+            stream_target, user_conn->send_file_size);
+        stream_target = (int)user_conn->send_file_size;
+        if (stream_target <= 0) {
+            stream_target = 1;
+        }
+    }
+    ctx->args->req_stream_cnt = stream_target;
+    user_conn->target_requests = stream_target;
+    user_conn->completed_requests = 0;
+
 
     int target_prepare = xqc_mini_cli_get_target_path_count(user_conn);
     for (int i = 1; i < target_prepare; i++) {
@@ -1371,7 +1571,7 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
 
     optind = 1;
 
-    while ((opt = getopt(argc, argv, "i:")) != -1) {
+     while ((opt = getopt(argc, argv, "i:s:a:p:m:")) != -1) {
         switch (opt) {
         case 'i':
             if (args->net_cfg.multi_interface_cnt >= MAX_PATH_CNT) {
@@ -1388,6 +1588,56 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
                 args->net_cfg.multi_interface[args->net_cfg.multi_interface_cnt]);
             args->net_cfg.multi_interface_cnt++;
             break;
+        case 'm':
+            if (strcmp(optarg, "minrtt") != 0
+                && strcmp(optarg, "backup") != 0
+                && strcmp(optarg, "balanced") != 0
+                && strcmp(optarg, "rap") != 0) {
+                printf("[warn] unsupported scheduler %s, keep default %s\n",
+                    optarg, args->quic_cfg.mp_sched);
+                break;
+            }
+
+            memset(args->quic_cfg.mp_sched, 0, sizeof(args->quic_cfg.mp_sched));
+            strncpy(args->quic_cfg.mp_sched, optarg, sizeof(args->quic_cfg.mp_sched) - 1);
+            printf("[stats] multipath scheduler set to %s\n", args->quic_cfg.mp_sched);
+            break;
+        case 's':
+        {
+            char *endptr = NULL;
+            long stream_cnt = strtol(optarg, &endptr, 10);
+            if (endptr == optarg || *endptr != '\0') {
+                printf("[warn] invalid stream count '%s', keep default\n", optarg);
+                break;
+            }
+            if (stream_cnt <= 0) {
+                printf("[warn] stream count must be positive, keep default\n");
+                break;
+            }
+            if (stream_cnt > XQC_MINI_MAX_STREAMS) {
+                printf("[warn] stream count %ld exceeds limit %d, clamp\n", stream_cnt, XQC_MINI_MAX_STREAMS);
+                stream_cnt = XQC_MINI_MAX_STREAMS;
+            }
+            args->req_stream_cnt = (int)stream_cnt;
+            printf("[stats] option request streams=%d\n", args->req_stream_cnt);
+            break;
+        }
+        case 'a':
+            memset(args->net_cfg.server_addr, 0, sizeof(args->net_cfg.server_addr));
+            strncpy(args->net_cfg.server_addr, optarg, sizeof(args->net_cfg.server_addr) - 1);
+            printf("[stats] option server addr=%s\n", args->net_cfg.server_addr);
+            break;
+        case 'p': {
+            char *endptr = NULL;
+            long port = strtol(optarg, &endptr, 10);
+            if (endptr == optarg || *endptr != '\0' || port <= 0 || port > UINT16_MAX) {
+                printf("[error] invalid port: %s\n", optarg);
+                return XQC_ERROR;
+            }
+            args->net_cfg.server_port = (unsigned short)port;
+            printf("[stats] option server port=%u\n", args->net_cfg.server_port);
+            break;
+        }
         default:
             break;
         }

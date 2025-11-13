@@ -43,6 +43,7 @@
 #define TRANSPORT_PARAMS_MAX_SIZE 8192
 #define TOKEN_MAX_SIZE 8192
 #define MAX_PATH_CNT 2
+#define XQC_MINI_MAX_STREAMS 16
 #define XQC_PACKET_BUF_LEN 1500
 #define XQC_MINI_PATH_ID_INVALID ((uint64_t)-1)
 #define XQC_MINI_INTERFACE_NAME_MAX_LEN 64
@@ -71,8 +72,8 @@ typedef struct xqc_mini_cli_net_config_s {
     // /* server addr info */
     // struct sockaddr    *addr;
     // socklen_t           addr_len;
-    // char                server_addr[64];
-    // short               server_port;
+    char                server_addr[64];
+    unsigned short      server_port;
 } xqc_mini_cli_net_config_t;
 
 /**
@@ -154,6 +155,9 @@ typedef struct xqc_mini_cli_args_s {
 
     /* request args */
     xqc_mini_cli_req_config_t   req_cfg;
+
+    /* request stream count */
+    int                         req_stream_cnt;
 } xqc_mini_cli_args_t;
 
 
@@ -197,12 +201,18 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     total_path_cnt;
     int                     active_path_cnt;
 
+    int                     target_requests;
+    int                     completed_requests;
+    size_t                  send_file_size;
+    char                    send_file_path[PATH_LEN];
+
     struct event            *ev_timeout;
 
 } xqc_mini_cli_user_conn_t;
 
 typedef struct xqc_mini_cli_user_stream_s {
     xqc_mini_cli_user_conn_t   *user_conn;
+    int                         stream_index;
 
     /* send file*/
     FILE                  *send_body_fp;
@@ -211,6 +221,7 @@ typedef struct xqc_mini_cli_user_stream_s {
     size_t                 file_size;
     size_t                 buffered_len;
     size_t                 buffered_sent;
+    size_t                 chunk_offset;
     /* save file */
     FILE                        *recv_body_fp;
 
@@ -230,6 +241,12 @@ typedef struct xqc_mini_cli_user_stream_s {
     char                       *send_body_buff;
     int                         send_body_size;
     size_t                      send_offset;
+
+    char                        header_content_length[32];
+    char                        header_stream_index[16];
+    char                        header_stream_count[16];
+    char                        header_stream_offset[32];
+    char                        header_total_size[32];
 
 } xqc_mini_cli_user_stream_t;
 
@@ -264,11 +281,11 @@ void xqc_mini_cli_init_0rtt(xqc_mini_cli_args_t *args);
 
 void xqc_mini_cli_init_conn_ssl_config(xqc_conn_ssl_config_t *conn_ssl_config, xqc_mini_cli_args_t *args);
 
-int xqc_mini_cli_format_h3_req(xqc_http_header_t *headers, xqc_mini_cli_req_config_t* req_cfg,size_t body_len);
+int xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,xqc_mini_cli_req_config_t* req_cfg, size_t body_len,xqc_mini_cli_user_stream_t *user_stream);
 
 int xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream_t *user_stream);
 
-int xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_stream_t *user_stream);
+int xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_stream_t *user_stream, int stream_index);
 
 int xqc_mini_cli_init_socket(xqc_mini_cli_user_path_t *user_path);
 

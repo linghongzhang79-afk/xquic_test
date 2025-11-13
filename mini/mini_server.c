@@ -1,5 +1,7 @@
 #include "mini_server.h"
+#include <stdint.h>
 
+static int xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[]);
 void
 xqc_mini_svr_init_ssl_config(xqc_engine_ssl_config_t  *ssl_cfg, xqc_mini_svr_args_t *args)
 {
@@ -63,7 +65,38 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     strncpy(args->env_cfg.private_key_file, PRIV_KEY_PATH, PATH_LEN - 1);
     strncpy(args->env_cfg.cert_file, CERT_PEM_PATH, PATH_LEN - 1);
 }
+static int
+xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[])
+{
+    int opt;
 
+    optind = 1;
+
+    while ((opt = getopt(argc, argv, "a:p:")) != -1) {
+        switch (opt) {
+        case 'a':
+            memset(args->net_cfg.ip, 0, sizeof(args->net_cfg.ip));
+            strncpy(args->net_cfg.ip, optarg, sizeof(args->net_cfg.ip) - 1);
+            printf("[stats] option listen addr=%s\n", args->net_cfg.ip);
+            break;
+        case 'p': {
+            char *endptr = NULL;
+            long port = strtol(optarg, &endptr, 10);
+            if (endptr == optarg || *endptr != '\0' || port <= 0 || port > UINT16_MAX) {
+                printf("[error] invalid port: %s\n", optarg);
+                return XQC_ERROR;
+            }
+            args->net_cfg.port = (unsigned short)port;
+            printf("[stats] option listen port=%u\n", args->net_cfg.port);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    return XQC_OK;
+}
 int
 xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 {
@@ -295,11 +328,21 @@ xqc_mini_svr_create_socket(xqc_mini_svr_user_conn_t *user_conn, xqc_mini_svr_net
     /* ipv4 socket */
     user_conn->local_addr->sin_family = AF_INET;
     user_conn->local_addr->sin_port = htons(cfg->port);
-    user_conn->local_addr->sin_addr.s_addr = htonl(INADDR_ANY);
+     if (strlen(cfg->ip) == 0 || strcmp(cfg->ip, "0.0.0.0") == 0) {
+        user_conn->local_addr->sin_addr.s_addr = htonl(INADDR_ANY);
+
+    } else {
+        struct in_addr listen_addr = {0};
+        if (inet_pton(AF_INET, cfg->ip, &listen_addr) != 1) {
+            printf("[error] invalid listen ip: %s\n", cfg->ip);
+            return -1;
+        }
+        user_conn->local_addr->sin_addr = listen_addr;
+    }
     user_conn->local_addrlen = sizeof(struct sockaddr_in);
     user_conn->fd = xqc_mini_svr_init_socket(AF_INET, cfg->port, (struct sockaddr*)user_conn->local_addr, 
         user_conn->local_addrlen);
-    printf("[stats] create ipv4 socket fd: %d success, bind socket to ip: %s, port: %d\n", user_conn->fd, cfg->ip, cfg->port);
+    printf("[stats] create ipv4 socket fd: %d success, bind socket to ip: %s, port: %u\n", user_conn->fd, cfg->ip, cfg->port);
 
     if (!user_conn->fd) {
         return -1;
@@ -550,6 +593,10 @@ main(int argc, char *argv[])
         goto exit;
     }
 
+    ret = xqc_mini_svr_parse_cmd_args(args, argc, argv);
+    if (ret != XQC_OK) {
+        goto exit;
+    }
     /* create & init engine to ctx->engine */
     ret = xqc_mini_svr_init_xquic_engine(ctx, args);
     if (ret < 0) {

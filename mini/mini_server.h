@@ -5,12 +5,14 @@
 #include <stdio.h>
 #include <errno.h>
 #include <memory.h>
+#include <string.h>
 #include <stdlib.h>
 #include <xquic/xquic.h>
 #include <event2/event.h>
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>
-
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include "common.h"
 #include "../demo/xqc_hq.h"
@@ -30,7 +32,7 @@ typedef struct xqc_mini_svr_net_config_s
 {
     /* server addr info */
     char    ip[64];
-    short   port;
+    unsigned short   port;
 
     /* idle persist timeout */
     int     conn_timeout;
