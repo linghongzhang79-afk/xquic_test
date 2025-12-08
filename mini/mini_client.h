@@ -125,6 +125,9 @@ typedef struct xqc_mini_cli_env_config_s {
 
     /* output file */
     char out_file_dir[PATH_LEN];
+
+    /* download target */
+    char download_path[PATH_LEN];
 } xqc_mini_cli_env_config_t;
 
 
@@ -247,6 +250,9 @@ typedef struct xqc_mini_cli_user_stream_s {
     char                        header_stream_count[16];
     char                        header_stream_offset[32];
     char                        header_total_size[32];
+    
+    char                        recv_file_path[PATH_LEN];
+    int                         response_status;
 
 } xqc_mini_cli_user_stream_t;
 

@@ -2,9 +2,12 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <netdb.h>
+#include <ctype.h>
+#include <strings.h>
 
 #define CHUNK_SIZE (4 * 1024)
-#define CLIENT_SEND_FILE "client_sent.txt"
+#define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
+#define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 
 static void xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data);
 static void xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data);
@@ -175,7 +178,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->quic_cfg.groups, XQC_TLS_GROUPS, TLS_GROUPS_LEN - 1);
     args->quic_cfg.multipath = 1;
     strncpy(args->quic_cfg.mp_sched, "balanced", sizeof(args->quic_cfg.mp_sched));
-    args->quic_cfg.cc = CC_TYPE_BBR;
+    args->quic_cfg.cc = CC_TYPE_CUBIC;
 
 
     /* init environmen args */
@@ -184,6 +187,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->env_cfg.log_path, LOG_PATH, sizeof(args->env_cfg.log_path));
     strncpy(args->env_cfg.out_file_dir, OUT_DIR, sizeof(args->env_cfg.out_file_dir));
     strncpy(args->env_cfg.key_out_path, KEY_PATH, sizeof(args->env_cfg.key_out_path));
+    strncpy(args->env_cfg.download_path, CLIENT_RECV_FILE, sizeof(args->env_cfg.download_path));
 
     /* init request args */
     /*
@@ -191,6 +195,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     */
     args->req_cfg.method = REQUEST_METHOD_POST;   
     strncpy(args->req_cfg.scheme, "https", sizeof(args->req_cfg.scheme));
+    strncpy(args->req_cfg.path, "/", sizeof(args->req_cfg.path));
     strncpy(args->req_cfg.url, "/", sizeof(args->req_cfg.url));
     strncpy(args->req_cfg.host, DEFAULT_HOST, sizeof(args->req_cfg.host));
     args->req_stream_cnt = 1;
@@ -254,6 +259,12 @@ xqc_mini_cli_get_sched_cb(xqc_mini_cli_args_t *args)
     else if (strncmp(args->quic_cfg.mp_sched, "rap", strlen("rap")) == 0) {
         sched = xqc_rap_scheduler_cb;
     }
+    else if (strncmp(args->quic_cfg.mp_sched, "act", strlen("act")) == 0) {
+        sched = xqc_act_scheduler_cb;
+    }
+    else if (strncmp(args->quic_cfg.mp_sched, "bw", strlen("bw")) == 0) {
+        sched = xqc_bandwidth_scheduler_cb;
+    }
     return sched;
 }
 
@@ -294,6 +305,8 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
     settings->adaptive_ack_frequency = 1;
     settings->enable_multipath = args->quic_cfg.multipath;
+    settings->init_recv_window = 512*1024*1024;
+    settings->multipath_version = XQC_MULTIPATH_10;
 }
 
 int
@@ -427,7 +440,7 @@ xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
         },
         {
             .name = {.iov_base = ":path", .iov_len = 5},
-            .value = {.iov_base = req_cfg->url, .iov_len = strlen(req_cfg->path)},
+            .value = {.iov_base = req_cfg->url, .iov_len = strlen(req_cfg->url)},
             .flags = 0,
         },
         {
@@ -562,11 +575,11 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         user_stream->buffered_sent += n;
         user_stream->total_sent += n;
 
-        printf("[stream %d] sent %zu/%zu bytes from offset %zu.\n",
-            user_stream->stream_index,
-            user_stream->total_sent,
-            user_stream->file_size,
-            user_stream->chunk_offset);
+        // printf("[stream %d] sent %zu/%zu bytes from offset %zu.\n",
+        //     user_stream->stream_index,
+        //     user_stream->total_sent,
+        //     user_stream->file_size,
+        //     user_stream->chunk_offset);
         ctx->args->net_cfg.last_socket_time = xqc_now();
         xqc_engine_main_logic(user_stream->user_conn->ctx->engine);
 
@@ -610,17 +623,35 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     xqc_mini_cli_req_config_t* req_cfg;
 
     req_cfg = &user_stream->user_conn->ctx->args->req_cfg;
-    // POST body
-    // const char *body = "{\"name\":\"docker\",\"type\":\"client\"}";
-    // size_t body_len = strlen(body);
-    FILE *fp = fopen(user_conn->send_file_path, "rb");
-    //fin = 1;
-    if(!fp ){
-        perror("fopen");
-        return -1;
+    
+
+    user_stream->send_body_fp = NULL;
+    user_stream->send_buffer = NULL;
+    user_stream->total_sent = 0;
+    user_stream->response_status = 0;
+
+    if (req_cfg->method == REQUEST_METHOD_POST) {
+        FILE *fp = fopen(user_conn->send_file_path, "rb");
+        if (!fp) {
+            perror("fopen");
+            return -1;
+        }
+        user_stream->send_body_fp = fp;
     }
-    user_stream->send_body_fp = fp;
-    user_stream->total_sent =0;
+
+    if (req_cfg->method == REQUEST_METHOD_GET) {
+        const char *base_path = user_conn->ctx->args->env_cfg.download_path;
+        if (user_conn->ctx->args->req_stream_cnt > 1) {
+            snprintf(user_stream->recv_file_path, sizeof(user_stream->recv_file_path),
+                "%s.part%d", base_path, stream_index);
+        } else {
+            strncpy(user_stream->recv_file_path, base_path,
+                sizeof(user_stream->recv_file_path) - 1);
+            user_stream->recv_file_path[sizeof(user_stream->recv_file_path) - 1] = '\0';
+        }
+    }
+    
+
     printf("[stream %d] segment offset=%zu length=%zu of total %zu bytes\n",
         stream_index, user_stream->chunk_offset, user_stream->file_size,
         user_conn->send_file_size);
@@ -830,7 +861,7 @@ xqc_mini_cli_dump_path_bindings(xqc_mini_cli_user_conn_t *user_conn)
         printf("[stats] detected %d distinct fds bound to interfaces above\n", unique_cnt);
     }
 }
-
+/*创建套接字，限制套接字对应的内核缓冲区大小 */
 int
 xqc_mini_cli_init_socket(xqc_mini_cli_user_path_t *user_path)
 {
@@ -1377,35 +1408,37 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
 
     user_conn->total_path_cnt = 1;
     user_conn->active_path_cnt = 1;
+    user_conn->send_file_size = 0;
 
     strncpy(user_conn->send_file_path, CLIENT_SEND_FILE,
         sizeof(user_conn->send_file_path) - 1);
-    FILE *send_fp = fopen(user_conn->send_file_path, "rb");
-    if (send_fp == NULL) {
-        perror("fopen");
-        printf("[error] failed to open send file '%s'\n", user_conn->send_file_path);
-        xqc_mini_cli_free_user_conn(user_conn);
-        return NULL;
-    }
-    if (fseek(send_fp, 0, SEEK_END) != 0) {
-        perror("fseek");
+    if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
+        FILE *send_fp = fopen(user_conn->send_file_path, "rb");
+        if (send_fp == NULL) {
+            perror("fopen");
+            printf("[error] failed to open send file '%s'\n", user_conn->send_file_path);
+            xqc_mini_cli_free_user_conn(user_conn);
+            return NULL;
+        }
+        if (fseek(send_fp, 0, SEEK_END) != 0) {
+            perror("fseek");
+            fclose(send_fp);
+            xqc_mini_cli_free_user_conn(user_conn);
+            return NULL;
+        }
+        long file_length = ftell(send_fp);
+        if (file_length < 0) {
+            perror("ftell");
+            fclose(send_fp);
+            xqc_mini_cli_free_user_conn(user_conn);
+            return NULL;
+        }
+        user_conn->send_file_size = (size_t)file_length;
+        rewind(send_fp);
         fclose(send_fp);
-        xqc_mini_cli_free_user_conn(user_conn);
-        return NULL;
+        printf("[stats] source file '%s' size=%zu bytes\n",
+            user_conn->send_file_path, user_conn->send_file_size);
     }
-    long file_length = ftell(send_fp);
-    if (file_length < 0) {
-        perror("ftell");
-        fclose(send_fp);
-        xqc_mini_cli_free_user_conn(user_conn);
-        return NULL;
-    }
-    user_conn->send_file_size = (size_t)file_length;
-    rewind(send_fp);
-    fclose(send_fp);
-
-    printf("[stats] source file '%s' size=%zu bytes\n",
-        user_conn->send_file_path, user_conn->send_file_size);
 
     int stream_target = ctx->args->req_stream_cnt;
     if (stream_target <= 0) {
@@ -1415,17 +1448,19 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         printf("[warn] exceed max stream count %d, clamp to limit\n", XQC_MINI_MAX_STREAMS);
         stream_target = XQC_MINI_MAX_STREAMS;
     }
-    if (user_conn->send_file_size == 0 && stream_target != 1) {
-        printf("[warn] send file is empty, forcing single stream\n");
-        stream_target = 1;
-    }
-    if (user_conn->send_file_size > 0
-        && (size_t)stream_target > user_conn->send_file_size) {
-        printf("[warn] stream count %d exceeds file bytes %zu, clamp\n",
-            stream_target, user_conn->send_file_size);
-        stream_target = (int)user_conn->send_file_size;
-        if (stream_target <= 0) {
+     if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
+        if (user_conn->send_file_size == 0 && stream_target != 1) {
+            printf("[warn] send file is empty, forcing single stream\n");
             stream_target = 1;
+        }
+        if (user_conn->send_file_size > 0
+            && (size_t)stream_target > user_conn->send_file_size) {
+            printf("[warn] stream count %d exceeds file bytes %zu, clamp\n",
+                stream_target, user_conn->send_file_size);
+            stream_target = (int)user_conn->send_file_size;
+            if (stream_target <= 0) {
+                stream_target = 1;
+            }
         }
     }
     ctx->args->req_stream_cnt = stream_target;
@@ -1571,7 +1606,7 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
 
     optind = 1;
 
-     while ((opt = getopt(argc, argv, "i:s:a:p:m:")) != -1) {
+     while ((opt = getopt(argc, argv, "i:s:a:p:m:M:u:o:")) != -1) {
         switch (opt) {
         case 'i':
             if (args->net_cfg.multi_interface_cnt >= MAX_PATH_CNT) {
@@ -1592,7 +1627,9 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
             if (strcmp(optarg, "minrtt") != 0
                 && strcmp(optarg, "backup") != 0
                 && strcmp(optarg, "balanced") != 0
-                && strcmp(optarg, "rap") != 0) {
+                && strcmp(optarg, "rap") != 0
+                && strcmp(optarg, "act") != 0
+                && strcmp(optarg, "bw") != 0) {
                 printf("[warn] unsupported scheduler %s, keep default %s\n",
                     optarg, args->quic_cfg.mp_sched);
                 break;
@@ -1638,11 +1675,49 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
             printf("[stats] option server port=%u\n", args->net_cfg.server_port);
             break;
         }
+        case 'M': {
+            char method_buf[8] = {0};
+            size_t len = strlen(optarg);
+            if (len >= sizeof(method_buf)) {
+                len = sizeof(method_buf) - 1;
+            }
+            for (size_t i = 0; i < len; i++) {
+                method_buf[i] = (char)toupper((unsigned char)optarg[i]);
+            }
+            if (strcmp(method_buf, "GET") == 0) {
+                args->req_cfg.method = REQUEST_METHOD_GET;
+                printf("[stats] HTTP method set to GET\n");
+            } else if (strcmp(method_buf, "POST") == 0) {
+                args->req_cfg.method = REQUEST_METHOD_POST;
+                printf("[stats] HTTP method set to POST\n");
+            } else {
+                printf("[warn] unsupported method %s, keep default %s\n",
+                    optarg, method_s[args->req_cfg.method]);
+            }
+            break;
+        }
+        case 'u':
+            strncpy(args->req_cfg.url, optarg, sizeof(args->req_cfg.url) - 1);
+            args->req_cfg.url[sizeof(args->req_cfg.url) - 1] = '\0';
+            strncpy(args->req_cfg.path, args->req_cfg.url, sizeof(args->req_cfg.path) - 1);
+            args->req_cfg.path[sizeof(args->req_cfg.path) - 1] = '\0';
+            printf("[stats] option request path=%s\n", args->req_cfg.url);
+            break;
+        case 'o':
+            strncpy(args->env_cfg.download_path, optarg,
+                sizeof(args->env_cfg.download_path) - 1);
+            args->env_cfg.download_path[sizeof(args->env_cfg.download_path) - 1] = '\0';
+            printf("[stats] option download file=%s\n", args->env_cfg.download_path);
+            break;
         default:
             break;
         }
     }
-
+    if (args->req_cfg.method == REQUEST_METHOD_GET
+        && args->req_stream_cnt != 1) {
+        printf("[warn] GET only supports a single request stream, clamp to 1\n");
+        args->req_stream_cnt = 1;
+    }
     return XQC_OK;
 }
 

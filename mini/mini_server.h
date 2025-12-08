@@ -18,7 +18,7 @@
 #include "../demo/xqc_hq.h"
 #include "../tests/platform.h"
 #include "mini_server_cb.h"
-
+#define SERVER_DEFAULT_FILE "server_data.bin"
 #define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
 #define XQC_PACKET_BUF_LEN 4096
@@ -88,6 +88,12 @@ typedef struct xqc_mini_svr_env_config_s {
 
     /* key export */
     char key_out_path[PATH_LEN];
+
+    /* directory for serving files */
+    char data_dir[PATH_LEN];
+
+    /* default file when client does not provide path */
+    char default_send_file[PATH_LEN];
 
 } xqc_mini_svr_env_config_t;
 

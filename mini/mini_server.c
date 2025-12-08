@@ -55,7 +55,7 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     args->quic_cfg.session_ticket_key_len = ret > 0 ? ret : 0;
     args->quic_cfg.cc = CC_TYPE_BBR;
     args->quic_cfg.multipath = 1;
-    strncpy(args->quic_cfg.mp_sched, "minrtt", 32);
+    strncpy(args->quic_cfg.mp_sched, "act", 32);
     strncpy(args->quic_cfg.ciphers, XQC_TLS_CIPHERS, CIPHER_SUIT_LEN - 1);
     strncpy(args->quic_cfg.groups, XQC_TLS_GROUPS, TLS_GROUPS_LEN - 1);
 
@@ -64,7 +64,12 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     strncpy(args->env_cfg.key_out_path, KEY_PATH, PATH_LEN - 1);
     strncpy(args->env_cfg.private_key_file, PRIV_KEY_PATH, PATH_LEN - 1);
     strncpy(args->env_cfg.cert_file, CERT_PEM_PATH, PATH_LEN - 1);
+    strncpy(args->env_cfg.data_dir, SOURCE_DIR, sizeof(args->env_cfg.data_dir) - 1);
+    strncpy(args->env_cfg.default_send_file, SERVER_DEFAULT_FILE,
+        sizeof(args->env_cfg.default_send_file) - 1);
 }
+
+/*f参数用于客户端未指定GET文件时，默认的回传文件，而d是数据目录*/
 static int
 xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[])
 {
@@ -72,7 +77,7 @@ xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[])
 
     optind = 1;
 
-    while ((opt = getopt(argc, argv, "a:p:")) != -1) {
+    while ((opt = getopt(argc, argv, "a:p:f:d:")) != -1) {
         switch (opt) {
         case 'a':
             memset(args->net_cfg.ip, 0, sizeof(args->net_cfg.ip));
@@ -90,6 +95,20 @@ xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[])
             printf("[stats] option listen port=%u\n", args->net_cfg.port);
             break;
         }
+        case 'f':
+            memset(args->env_cfg.default_send_file, 0,
+                sizeof(args->env_cfg.default_send_file));
+            strncpy(args->env_cfg.default_send_file, optarg,
+                sizeof(args->env_cfg.default_send_file) - 1);
+            printf("[stats] default send file=%s\n",
+                args->env_cfg.default_send_file);
+            break;
+        case 'd':
+            memset(args->env_cfg.data_dir, 0, sizeof(args->env_cfg.data_dir));
+            strncpy(args->env_cfg.data_dir, optarg,
+                sizeof(args->env_cfg.data_dir) - 1);
+            printf("[stats] data directory=%s\n", args->env_cfg.data_dir);
+            break;
         default:
             break;
         }
@@ -228,6 +247,9 @@ xqc_mini_svr_get_sched_cb(xqc_mini_svr_args_t *args)
     } if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
         sched = xqc_backup_scheduler_cb;
     }
+    if(strncmp(args->quic_cfg.mp_sched, "act", strlen("act")) == 0){
+        sched = xqc_act_scheduler_cb;
+    }
     return sched;
 }
 
@@ -244,7 +266,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .cong_ctrl_callback = ccc,
         .cc_params = {
             .customize_on = 1,
-            .init_cwnd = 32,
+            .init_cwnd = 96,
             .bbr_enable_lt_bw = 1,
         },
         .spurious_loss_detect_on = 1,
@@ -263,7 +285,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
     xqc_server_set_conn_settings(engine, &conn_settings);
 }
 
-/* create socket and bind port */
+/* create socket and bind port, 限制套接字对应的内核缓冲区大小 */
 static int
 xqc_mini_svr_init_socket(int family, uint16_t port, 
         struct sockaddr *local_addr, socklen_t local_addrlen)

@@ -175,6 +175,7 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     //printf("[stats] xqc_mini_cli_h3_request_close_notify success, cwnd_blocked:%"PRIu64"\n", stats.cwnd_blocked_ms);
     return 0;
 }
+/*用于触发接收事件回调，常用于GET方法或者接收response*/
 int
 xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request, 
     xqc_request_notify_flag_t flag, void *h3s_user_data)
@@ -193,10 +194,37 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             printf("[error] xqc_h3_request_recv_headers error\n");
             return XQC_ERROR;
         }
-
+        int status_code = 0;
         for (int i = 0; i < headers->count; i++) {
             printf("[receive report] %s = %s\n", (char *)headers->headers[i].name.iov_base,
                 (char *)headers->headers[i].value.iov_base);
+            if (headers->headers[i].name.iov_len == strlen(":status")
+                && strncmp((char *)headers->headers[i].name.iov_base, ":status",
+                           headers->headers[i].name.iov_len) == 0) {
+                char status_buf[4] = {0};
+                size_t len = headers->headers[i].value.iov_len;
+                if (len >= sizeof(status_buf)) {
+                    len = sizeof(status_buf) - 1;
+                }
+                memcpy(status_buf, headers->headers[i].value.iov_base, len);
+                status_code = atoi(status_buf);
+            }
+        }
+
+        user_stream->response_status = status_code;
+
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && status_code >= 200 && status_code < 300
+            && user_stream->recv_body_fp == NULL) {
+            const char *download_path = user_stream->recv_file_path[0]
+                ? user_stream->recv_file_path
+                : user_conn->ctx->args->env_cfg.download_path;
+            user_stream->recv_body_fp = fopen(download_path, "wb");
+            if (user_stream->recv_body_fp == NULL) {
+                perror("fopen");
+                return XQC_ERROR;
+            }
+            printf("[stats] response body will be stored in %s\n", download_path);
         }
 
         if (fin) {
@@ -227,11 +255,30 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
     
         read_sum += read;
         user_stream->recv_body_len += read;
+
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && user_stream->recv_body_fp != NULL && read > 0) {
+            size_t written = fwrite(recv_buff, 1, (size_t)read,
+                user_stream->recv_body_fp);
+            if (written != (size_t)read) {
+                perror("fwrite");
+                return XQC_ERROR;
+            }
+        }
     } while (read > 0 && !fin);
 
     printf("[report] xqc_h3_request_recv_body size %zd, fin:%d\n", read, fin);
 
     if (fin) {
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && user_stream->recv_body_fp != NULL) {
+            fflush(user_stream->recv_body_fp);
+            const char *download_path = user_stream->recv_file_path[0]
+                ? user_stream->recv_file_path
+                : user_conn->ctx->args->env_cfg.download_path;
+            printf("[stats] download complete, %zu bytes saved to %s\n",
+                user_stream->recv_body_len, download_path);
+        }
         printf("[stats] read h3 request finish. \n");
     }
 

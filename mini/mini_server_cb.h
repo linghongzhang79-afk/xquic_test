@@ -23,6 +23,7 @@
 typedef struct xqc_mini_svr_user_stream_s {
     xqc_h3_request_t           *h3_request;
     FILE                        *recv_body_fp;
+    FILE                        *send_body_fp;
     size_t                       expected_content_length;
     int                          fin_received;
 
@@ -32,6 +33,7 @@ typedef struct xqc_mini_svr_user_stream_s {
     size_t                       stream_offset;
     size_t                       total_file_size;
     int                          file_generation;
+    REQUEST_METHOD               method;
 
     struct timeval start_time;
     struct timeval end_time;
@@ -42,6 +44,22 @@ typedef struct xqc_mini_svr_user_stream_s {
     size_t                      send_body_len;
     size_t                      recv_body_len;
     char                       *recv_buf;
+
+    size_t                      response_body_len;
+    size_t                      response_body_sent;
+    size_t                      buffered_len;
+    size_t                      buffered_sent;
+    unsigned char               send_cache[REQ_BUF_SIZE];
+    int                         response_prepared;
+    int                         use_file_response;
+    int                         response_status;
+    char                        *response_content_type;
+    char                        response_status_str[4];
+    char                        response_content_length[32];
+    char                        static_response[256];
+    size_t                      static_response_len;
+    char                        request_path[PATH_LEN];
+    char                        resolved_path[PATH_LEN];
 } xqc_mini_svr_user_stream_t;
 
 
