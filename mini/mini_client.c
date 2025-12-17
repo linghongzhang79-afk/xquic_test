@@ -686,7 +686,7 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     }
     user_stream->buffered_len = 0;
     user_stream->buffered_sent = 0;
-
+    user_stream->start_time = xqc_now();
     xqc_mini_cli_request_send(user_stream->h3_request, user_stream);
 
     /* generate engine main log to send packets */

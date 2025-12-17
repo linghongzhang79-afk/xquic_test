@@ -5,6 +5,7 @@
  * 3. h3 callbacks
  */
 #include "mini_client_cb.h"
+#include <strings.h>
 /**
  * @brief engine callbacks to trigger engine main logic 
  */
@@ -208,6 +209,15 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 }
                 memcpy(status_buf, headers->headers[i].value.iov_base, len);
                 status_code = atoi(status_buf);
+            }else if (strncasecmp((char *)headers->headers[i].name.iov_base,
+                "content-length", headers->headers[i].name.iov_len) == 0) {
+                char length_buf[32] = {0};
+                size_t len = headers->headers[i].value.iov_len;
+                if (len >= sizeof(length_buf)) {
+                    len = sizeof(length_buf) - 1;
+                }
+                memcpy(length_buf, headers->headers[i].value.iov_base, len);
+                user_stream->expected_content_length = strtoull(length_buf, NULL, 10);
             }
         }
 
@@ -242,7 +252,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
     recv_buff_size = XQC_MAX_BUFF_SIZE;
     read = read_sum = 0;
-
+    user_stream->start_time = xqc_now();
     do {
         read = xqc_h3_request_recv_body(h3_request, recv_buff, recv_buff_size, &fin);
         if (read == -XQC_EAGAIN) {
@@ -255,6 +265,17 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
     
         read_sum += read;
         user_stream->recv_body_len += read;
+        
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && user_stream->expected_content_length > 0) {
+            double progress = (double)user_stream->recv_body_len * 100.0
+                / user_stream->expected_content_length;
+            if (progress > 100.0) {
+                progress = 100.0;
+            }
+            printf("\r[download] %.2f%%", progress);
+            fflush(stdout);
+        }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && user_stream->recv_body_fp != NULL && read > 0) {
@@ -271,6 +292,10 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
     if (fin) {
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && user_stream->expected_content_length > 0) {
+            printf("\n");
+        }
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && user_stream->recv_body_fp != NULL) {
             fflush(user_stream->recv_body_fp);
             const char *download_path = user_stream->recv_file_path[0]
@@ -279,6 +304,15 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             printf("[stats] download complete, %zu bytes saved to %s\n",
                 user_stream->recv_body_len, download_path);
         }
+        xqc_usec_t end_time = xqc_now();
+        double duration_ms = (user_stream->start_time > 0)
+            ? (end_time - user_stream->start_time) / 1000.0
+            : 0.0;
+        double mbps = duration_ms > 0
+            ? (user_stream->recv_body_len * 8.0) / (duration_ms * 1000.0)
+            : 0.0;
+        printf("[stats] recv finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
+            user_stream->recv_body_len, duration_ms, mbps);
         printf("[stats] read h3 request finish. \n");
     }
 

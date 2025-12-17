@@ -231,6 +231,7 @@ typedef struct xqc_mini_cli_user_stream_s {
     /* stat for IO */
     size_t                      send_body_len;
     size_t                      recv_body_len;
+    size_t                      expected_content_length;
     int                         recv_fin;
     xqc_msec_t                  start_time;
 
