@@ -38,6 +38,11 @@ typedef struct xqc_mini_svr_user_stream_s {
     struct timeval start_time;
     struct timeval end_time;
 
+    struct timeval send_start_time;
+    struct timeval send_end_time;
+    int                         send_started;
+    int                         send_logged;
+
     // uint64_t            send_offset;
     int                         header_sent;
     int                         header_recvd;
@@ -50,6 +55,8 @@ typedef struct xqc_mini_svr_user_stream_s {
     size_t                      buffered_len;
     size_t                      buffered_sent;
     unsigned char               send_cache[REQ_BUF_SIZE];
+    int                         use_generated_response;
+    size_t                      requested_generated_length;
     int                         response_prepared;
     int                         use_file_response;
     int                         response_status;

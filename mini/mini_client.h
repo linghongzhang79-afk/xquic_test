@@ -161,6 +161,9 @@ typedef struct xqc_mini_cli_args_s {
 
     /* request stream count */
     int                         req_stream_cnt;
+
+    /* payload size for POST body; 0 means use existing file size */
+    size_t                      send_data_len;
 } xqc_mini_cli_args_t;
 
 
@@ -209,6 +212,11 @@ typedef struct xqc_mini_cli_user_conn_s {
     size_t                  send_file_size;
     char                    send_file_path[PATH_LEN];
 
+    xqc_msec_t              upload_start_time;
+    int                     upload_finished_streams;
+    size_t                  upload_total_bytes;
+
+
     struct event            *ev_timeout;
 
 } xqc_mini_cli_user_conn_t;
@@ -234,6 +242,7 @@ typedef struct xqc_mini_cli_user_stream_s {
     size_t                      expected_content_length;
     int                         recv_fin;
     xqc_msec_t                  start_time;
+    int                         send_finished;
 
 
     /* h3 request content */

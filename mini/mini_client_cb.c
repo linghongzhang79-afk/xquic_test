@@ -236,13 +236,14 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             }
             printf("[stats] response body will be stored in %s\n", download_path);
         }
-
+        user_stream->start_time = xqc_now();
         if (fin) {
             /* only header in request */
             user_stream->recv_fin = 1;
             printf("[stats] h3 request read header finish \n");
             return XQC_OK;
         }
+        
     }
 
     /* continue to recv body */
@@ -252,7 +253,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
     recv_buff_size = XQC_MAX_BUFF_SIZE;
     read = read_sum = 0;
-    user_stream->start_time = xqc_now();
+    
     do {
         read = xqc_h3_request_recv_body(h3_request, recv_buff, recv_buff_size, &fin);
         if (read == -XQC_EAGAIN) {
@@ -288,7 +289,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
     } while (read > 0 && !fin);
 
-    printf("[report] xqc_h3_request_recv_body size %zd, fin:%d\n", read, fin);
+    //printf("[report] xqc_h3_request_recv_body size %zd, fin:%d\n", read, fin);
 
     if (fin) {
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET

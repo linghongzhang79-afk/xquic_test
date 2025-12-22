@@ -67,6 +67,7 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     strncpy(args->env_cfg.data_dir, SOURCE_DIR, sizeof(args->env_cfg.data_dir) - 1);
     strncpy(args->env_cfg.default_send_file, SERVER_DEFAULT_FILE,
         sizeof(args->env_cfg.default_send_file) - 1);
+    
 }
 
 /*f参数用于客户端未指定GET文件时，默认的回传文件，而d是数据目录*/
@@ -427,7 +428,7 @@ xqc_mini_svr_socket_write_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
 void
 xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
 {
-    static size_t total_recv = 0;   // 累计接收字节数
+    //static size_t total_recv = 0;   // 累计接收字节数
     ssize_t recv_size;
     struct sockaddr_storage peer_addr;
     socklen_t peer_addrlen = sizeof(peer_addr);
@@ -489,12 +490,12 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
             fprintf(stderr, "[error] xqc_engine_packet_process ret=%d\n", ret);
         }
 
-        total_recv += recv_size;
-        // 每 10MB 打印一次
-        if (total_recv % (10 * 1024 * 1024) < recv_size) {
-            printf("[server socket] total UDP received: %.2f MB\n",
-                   (double)total_recv / (1024 * 1024));
-        }
+        // total_recv += recv_size;
+        // // 每 10MB 打印一次
+        // if (total_recv % (10 * 1024 * 1024) < recv_size) {
+        //     printf("[server socket] total UDP received: %.2f MB\n",
+        //            (double)total_recv / (1024 * 1024));
+        // }    
     }
 
     // ✅ 通知 QUIC 引擎本轮接收完成

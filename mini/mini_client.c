@@ -21,7 +21,31 @@ static int xqc_mini_cli_bind_to_interface(int fd, const char *interface_name, in
 static int xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path);
 static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen,
     char *buf, size_t buflen);
+static void
+xqc_mini_cli_notify_upload_finished(xqc_mini_cli_user_stream_t *user_stream)
+{
+    if (user_stream->send_finished) {
+        return;
+    }
 
+    xqc_mini_cli_user_conn_t *user_conn = user_stream->user_conn;
+
+    user_stream->send_finished = 1;
+    user_conn->upload_finished_streams++;
+    user_conn->upload_total_bytes += user_stream->total_sent;
+
+    if (user_conn->upload_finished_streams >= user_conn->target_requests) {
+        xqc_usec_t end_time = xqc_now();
+        double duration_ms = (user_conn->upload_start_time > 0)
+            ? (end_time - user_conn->upload_start_time) / 1000.0
+            : 0.0;
+        double mbps = duration_ms > 0
+            ? (user_conn->upload_total_bytes * 8.0) / (duration_ms * 1000.0)
+            : 0.0;
+        printf("[stats] all streams sent: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
+            user_conn->upload_total_bytes, duration_ms, mbps);
+    }
+}
 
 static void
 xqc_mini_cli_compute_stream_segment(const xqc_mini_cli_user_conn_t *user_conn,
@@ -199,6 +223,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->req_cfg.url, "/", sizeof(args->req_cfg.url));
     strncpy(args->req_cfg.host, DEFAULT_HOST, sizeof(args->req_cfg.host));
     args->req_stream_cnt = 1;
+    args->send_data_len = 0;
 }
 
 int
@@ -527,11 +552,11 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         || user_stream->buffered_sent < user_stream->buffered_len) {
         
          if (user_stream->buffered_sent == user_stream->buffered_len) {
-            if (fseek(user_stream->send_body_fp,
-                    (long)(user_stream->chunk_offset + user_stream->total_sent), SEEK_SET) != 0) {
-                perror("fseek");
-                return -1;
-            }
+            // if (fseek(user_stream->send_body_fp,
+            //         (long)(user_stream->chunk_offset + user_stream->total_sent), SEEK_SET) != 0) {
+            //     perror("fseek");
+            //     return -1;
+            // }
             
             size_t remaining = user_stream->file_size - user_stream->total_sent;
             size_t chunk = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
@@ -539,23 +564,28 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
             if (chunk == 0) {
                 break;
             }
-            user_stream->buffered_len = fread(buffer, 1, CHUNK_SIZE, user_stream->send_body_fp);
-            user_stream->buffered_sent = 0;
+            // user_stream->buffered_len = fread(buffer, 1, CHUNK_SIZE, user_stream->send_body_fp);
+            // user_stream->buffered_sent = 0;
 
-            if (user_stream->buffered_len == 0) {
-                if (feof(user_stream->send_body_fp)) {
-                    if (user_stream->total_sent < user_stream->file_size) {
-                        printf("[error] unexpected EOF after %zu/%zu bytes\n",
-                               user_stream->total_sent, user_stream->file_size);
-                        return -1;
-                    }
-                    break;
-                }
-                if (ferror(user_stream->send_body_fp)) {
-                    perror("fread");
-                    return -1;
-                }
+            // if (user_stream->buffered_len == 0) {
+            //     if (feof(user_stream->send_body_fp)) {
+            //         if (user_stream->total_sent < user_stream->file_size) {
+            //             printf("[error] unexpected EOF after %zu/%zu bytes\n",
+            //                    user_stream->total_sent, user_stream->file_size);
+            //             return -1;
+            //         }
+            //         break;
+            //     }
+            //     if (ferror(user_stream->send_body_fp)) {
+            //         perror("fread");
+            //         return -1;
+            //     }
+             for (size_t i = 0; i < chunk; i++) {
+                size_t global_index = user_stream->chunk_offset + user_stream->total_sent + i;
+                buffer[i] = (global_index % 2 == 0) ? '0' : '1';
             }
+            user_stream->buffered_len = chunk;
+            user_stream->buffered_sent = 0;
         }
         
         size_t bytes_left_in_buffer = user_stream->buffered_len - user_stream->buffered_sent;
@@ -588,9 +618,16 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         }
 
         if (fin) {
-            printf("[stream %d] segment complete: %zu bytes at offset %zu\n",
-                user_stream->stream_index, user_stream->total_sent,
-                user_stream->chunk_offset);
+            xqc_usec_t end_time = xqc_now();
+            double duration_ms = (user_stream->start_time > 0)
+                ? (end_time - user_stream->start_time) / 1000.0
+                : 0.0;
+            double mbps = duration_ms > 0
+                ? (user_stream->total_sent * 8.0) / (duration_ms * 1000.0)
+                : 0.0;
+            printf("[stream %d at offset %zu] send finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
+                user_stream->stream_index, user_stream->chunk_offset, user_stream->total_sent, duration_ms, mbps);
+            xqc_mini_cli_notify_upload_finished(user_stream);
             break;
         }
     }
@@ -630,14 +667,14 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     user_stream->total_sent = 0;
     user_stream->response_status = 0;
 
-    if (req_cfg->method == REQUEST_METHOD_POST) {
-        FILE *fp = fopen(user_conn->send_file_path, "rb");
-        if (!fp) {
-            perror("fopen");
-            return -1;
-        }
-        user_stream->send_body_fp = fp;
-    }
+    // if (req_cfg->method == REQUEST_METHOD_POST) {
+    //     FILE *fp = fopen(user_conn->send_file_path, "rb");
+    //     if (!fp) {
+    //         perror("fopen");
+    //         return -1;
+    //     }
+    //     user_stream->send_body_fp = fp;
+    // }
 
     if (req_cfg->method == REQUEST_METHOD_GET) {
         const char *base_path = user_conn->ctx->args->env_cfg.download_path;
@@ -660,7 +697,9 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     if (ret > 0) {
         user_stream->h3_hdrs.headers = header;
         user_stream->h3_hdrs.count = ret;
-
+        if (user_conn->upload_start_time == 0) {
+            user_conn->upload_start_time = xqc_now();
+        }
         if (user_stream->start_time == 0) {
             user_stream->start_time = xqc_now();
         }
@@ -1408,36 +1447,46 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
 
     user_conn->total_path_cnt = 1;
     user_conn->active_path_cnt = 1;
-    user_conn->send_file_size = 0;
+    user_conn->send_file_size = ctx->args->send_data_len;
+    user_conn->upload_start_time = 0;
+    user_conn->upload_finished_streams = 0;
+    user_conn->upload_total_bytes = 0;
 
-    strncpy(user_conn->send_file_path, CLIENT_SEND_FILE,
-        sizeof(user_conn->send_file_path) - 1);
+    // strncpy(user_conn->send_file_path, CLIENT_SEND_FILE,
+    //     sizeof(user_conn->send_file_path) - 1);
+    memset(user_conn->send_file_path, 0, sizeof(user_conn->send_file_path));
     if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
-        FILE *send_fp = fopen(user_conn->send_file_path, "rb");
-        if (send_fp == NULL) {
-            perror("fopen");
-            printf("[error] failed to open send file '%s'\n", user_conn->send_file_path);
-            xqc_mini_cli_free_user_conn(user_conn);
-            return NULL;
+        // FILE *send_fp = fopen(user_conn->send_file_path, "rb");
+        // if (send_fp == NULL) {
+        //     perror("fopen");
+        //     printf("[error] failed to open send file '%s'\n", user_conn->send_file_path);
+        //     xqc_mini_cli_free_user_conn(user_conn);
+        //     return NULL;
+        // }
+        // if (fseek(send_fp, 0, SEEK_END) != 0) {
+        //     perror("fseek");
+        //     fclose(send_fp);
+        //     xqc_mini_cli_free_user_conn(user_conn);
+        //     return NULL;
+        // }
+        // long file_length = ftell(send_fp);
+        // if (file_length < 0) {
+        //     perror("ftell");
+        //     fclose(send_fp);
+        //     xqc_mini_cli_free_user_conn(user_conn);
+        //     return NULL;
+        // }
+        if (user_conn->send_file_size == 0) {
+            printf("[warn] send data length is 0, will send empty body\n");
+        } else {
+            printf("[stats] prepared generated payload size=%zu bytes\n",
+                user_conn->send_file_size);
         }
-        if (fseek(send_fp, 0, SEEK_END) != 0) {
-            perror("fseek");
-            fclose(send_fp);
-            xqc_mini_cli_free_user_conn(user_conn);
-            return NULL;
-        }
-        long file_length = ftell(send_fp);
-        if (file_length < 0) {
-            perror("ftell");
-            fclose(send_fp);
-            xqc_mini_cli_free_user_conn(user_conn);
-            return NULL;
-        }
-        user_conn->send_file_size = (size_t)file_length;
-        rewind(send_fp);
-        fclose(send_fp);
-        printf("[stats] source file '%s' size=%zu bytes\n",
-            user_conn->send_file_path, user_conn->send_file_size);
+        // user_conn->send_file_size = (size_t)file_length;
+        // rewind(send_fp);
+        // fclose(send_fp);
+        // printf("[stats] source file '%s' size=%zu bytes\n",
+        //     user_conn->send_file_path, user_conn->send_file_size);
     }
 
     int stream_target = ctx->args->req_stream_cnt;
@@ -1606,7 +1655,7 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
 
     optind = 1;
 
-     while ((opt = getopt(argc, argv, "i:s:a:p:m:M:u:o:")) != -1) {
+     while ((opt = getopt(argc, argv, "i:s:a:p:m:M:u:o:l:")) != -1) {
         switch (opt) {
         case 'i':
             if (args->net_cfg.multi_interface_cnt >= MAX_PATH_CNT) {
@@ -1709,6 +1758,17 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
             args->env_cfg.download_path[sizeof(args->env_cfg.download_path) - 1] = '\0';
             printf("[stats] option download file=%s\n", args->env_cfg.download_path);
             break;
+        case 'l': {
+            char *endptr = NULL;
+            unsigned long long bytes = strtoull(optarg, &endptr, 10);
+            if (endptr == optarg || *endptr != '\0') {
+                printf("[warn] invalid payload size '%s', keep default\n", optarg);
+                break;
+            }
+            args->send_data_len = (size_t)bytes;
+            printf("[stats] option send data length=%zu bytes\n", args->send_data_len);
+            break;
+        }
         default:
             break;
         }
