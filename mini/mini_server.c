@@ -1,6 +1,115 @@
 #include "mini_server.h"
 #include <stdint.h>
 
+static char *
+xqc_mini_svr_trim_space(char *text)
+{
+    if (text == NULL) {
+        return NULL;
+    }
+
+    while (*text && isspace((unsigned char)*text)) {
+        text++;
+    }
+
+    if (*text == '\0') {
+        return text;
+    }
+
+    char *end = text + strlen(text) - 1;
+    while (end > text && isspace((unsigned char)*end)) {
+        *end = '\0';
+        end--;
+    }
+
+    return text;
+}
+
+static int
+xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return XQC_OK;
+    }
+
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        return XQC_OK;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        char *line_ptr = xqc_mini_svr_trim_space(line);
+        if (line_ptr[0] == '\0' || line_ptr[0] == '#') {
+            continue;
+        }
+
+        char *eq = strchr(line_ptr, '=');
+        if (eq == NULL) {
+            continue;
+        }
+
+        *eq = '\0';
+        char *key = xqc_mini_svr_trim_space(line_ptr);
+        char *value = xqc_mini_svr_trim_space(eq + 1);
+        if (key[0] == '\0' || value[0] == '\0') {
+            continue;
+        }
+
+        if (strcmp(key, "listen_addr") == 0 || strcmp(key, "server_addr") == 0) {
+            memset(args->net_cfg.ip, 0, sizeof(args->net_cfg.ip));
+            strncpy(args->net_cfg.ip, value, sizeof(args->net_cfg.ip) - 1);
+
+        } else if (strcmp(key, "listen_port") == 0 || strcmp(key, "server_port") == 0) {
+            char *endptr = NULL;
+            long port = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && port > 0 && port <= UINT16_MAX) {
+                args->net_cfg.port = (unsigned short)port;
+            }
+
+        } else if (strcmp(key, "data_dir") == 0) {
+            memset(args->env_cfg.data_dir, 0, sizeof(args->env_cfg.data_dir));
+            strncpy(args->env_cfg.data_dir, value, sizeof(args->env_cfg.data_dir) - 1);
+
+        } else if (strcmp(key, "default_send_file") == 0) {
+            memset(args->env_cfg.default_send_file, 0,
+                sizeof(args->env_cfg.default_send_file));
+            strncpy(args->env_cfg.default_send_file, value,
+                sizeof(args->env_cfg.default_send_file) - 1);
+        } else if (strcmp(key, "kernel_sndbuf") == 0) {
+            char *endptr = NULL;
+            long size = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.kernel_sndbuf = (int)size;
+            }
+
+        } else if (strcmp(key, "kernel_revbuf") == 0) {
+            char *endptr = NULL;
+            long size = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.kernel_revbuf = (int)size;
+            }
+
+        } else if (strcmp(key, "user_send_buf_size") == 0) {
+            char *endptr = NULL;
+            unsigned long long size = strtoull(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.user_send_buf_size = (size_t)size;
+            }
+
+        } else if (strcmp(key, "user_recv_buf_size") == 0) {
+            char *endptr = NULL;
+            unsigned long long size = strtoull(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.user_recv_buf_size = (size_t)size;
+            }
+        }
+    }
+
+    fclose(fp);
+    return XQC_OK;
+}
+
 
 void
 xqc_mini_svr_init_ssl_config(xqc_engine_ssl_config_t  *ssl_cfg, xqc_mini_svr_args_t *args)
@@ -44,6 +153,11 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     /* init network args */
     strncpy(args->net_cfg.ip, DEFAULT_IP, sizeof(args->net_cfg.ip) - 1);
     args->net_cfg.port = DEFAULT_PORT;
+    args->net_cfg.kernel_sndbuf = 16 * 1024 * 1024;
+    args->net_cfg.kernel_revbuf = 16 * 1024 * 1024;
+    args->net_cfg.user_send_buf_size = XQC_PACKET_BUF_LEN;
+    args->net_cfg.user_recv_buf_size = XQC_PACKET_BUF_LEN;
+
 
     /**
      * init quic config
@@ -219,6 +333,9 @@ xqc_mini_svr_init_env(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
     /* init server args */
     xqc_mini_svr_init_args(args);
 
+    /* load config file defaults if present */
+    xqc_mini_svr_load_config_file(args, MINI_SERVER_CONFIG_FILE);
+
     /* init server ctx */
     ret = xqc_mini_svr_init_ctx(ctx, args);
 
@@ -292,8 +409,9 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
 
 /* create socket and bind port, 限制套接字对应的内核缓冲区大小 */
 static int
-xqc_mini_svr_init_socket(int family, uint16_t port, 
-        struct sockaddr *local_addr, socklen_t local_addrlen)
+xqc_mini_svr_init_socket(int family, struct sockaddr *local_addr,
+        socklen_t local_addrlen, const xqc_mini_svr_net_config_t *cfg)
+
 {
     int size;
     int opt_reuseaddr;
@@ -324,15 +442,22 @@ xqc_mini_svr_init_socket(int family, uint16_t port,
     }
 
     /* send/recv buffer size */
-    size = 16 * 1024 * 1024;
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
-        printf("setsockopt failed, errno: %d\n", get_sys_errno());
-        goto err;
+    if (cfg && cfg->kernel_revbuf > 0) {
+        size = cfg->kernel_revbuf;
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
+            printf("setsockopt failed, errno: %d\n", get_sys_errno());
+            goto err;
+        }
+
     }
 
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(int)) < 0) {
-        printf("setsockopt failed, errno: %d\n", get_sys_errno());
-        goto err;
+    if (cfg && cfg->kernel_sndbuf > 0) {
+        size = cfg->kernel_sndbuf;
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(int)) < 0) {
+            printf("setsockopt failed, errno: %d\n", get_sys_errno());
+            goto err;
+        }
+
     }
 
     /* bind port */
@@ -367,8 +492,9 @@ xqc_mini_svr_create_socket(xqc_mini_svr_user_conn_t *user_conn, xqc_mini_svr_net
         user_conn->local_addr->sin_addr = listen_addr;
     }
     user_conn->local_addrlen = sizeof(struct sockaddr_in);
-    user_conn->fd = xqc_mini_svr_init_socket(AF_INET, cfg->port, (struct sockaddr*)user_conn->local_addr, 
-        user_conn->local_addrlen);
+    user_conn->fd = xqc_mini_svr_init_socket(AF_INET, (struct sockaddr*)user_conn->local_addr,
+        user_conn->local_addrlen, cfg);
+
     printf("[stats] create ipv4 socket fd: %d success, bind socket to ip: %s, port: %u\n", user_conn->fd, cfg->ip, cfg->port);
 
     if (!user_conn->fd) {
@@ -438,8 +564,15 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
     socklen_t peer_addrlen = sizeof(peer_addr);
     xqc_mini_svr_ctx_t *ctx = user_conn->ctx;
 
-    // ✅ 建议把这个长度设成 8192 或更大
+    size_t buffer_capacity = ctx->args->net_cfg.user_recv_buf_size > 0
+        ? ctx->args->net_cfg.user_recv_buf_size
+        : XQC_PACKET_BUF_LEN;
     unsigned char packet_buf[XQC_PACKET_BUF_LEN];
+    if (packet_buf == NULL) {
+        printf("[error] allocate recv buffer failed\n");
+        return;
+    }
+
 
     ctx->current_fd = fd;
 

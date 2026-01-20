@@ -8,6 +8,7 @@
 #define CHUNK_SIZE (8 * 1024)
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
+#define MINI_CONFIG_FILE "client_config.txt"
 
 static void xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data);
 static void xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data);
@@ -194,7 +195,9 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
         memset(args->net_cfg.multi_interface[i], 0, sizeof(args->net_cfg.multi_interface[i]));
     }
     args->net_cfg.kernel_sndbuf = 16 * 1024 * 1024;
+    args->net_cfg.kernel_revbuf = 16 * 1024 * 1024;
     args->net_cfg.user_send_buf_size = CHUNK_SIZE;
+    args->net_cfg.user_recv_buf_size = XQC_PACKET_BUF_LEN;
 
     strncpy(args->net_cfg.server_addr, DEFAULT_IP, sizeof(args->net_cfg.server_addr) - 1);
     args->net_cfg.server_addr[sizeof(args->net_cfg.server_addr) - 1] = '\0';
@@ -267,6 +270,9 @@ xqc_mini_cli_init_env(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 
     /* init client args */
     xqc_mini_cli_init_args(args);
+
+    /* load config file defaults if present */
+    xqc_mini_cli_load_config_file(args, MINI_CONFIG_FILE);
     
     /* init client ctx */
     ret = xqc_mini_cli_init_ctx(ctx, args);
@@ -1013,17 +1019,26 @@ xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_path_t *user_path, int fd)
     ssize_t recv_size, recv_sum;
     uint64_t recv_time;
     xqc_int_t ret;
-    unsigned char packet_buf[XQC_PACKET_BUF_LEN];
+    
     xqc_mini_cli_ctx_t *ctx;
     xqc_mini_cli_user_conn_t *user_conn;
 
     recv_size = recv_sum = 0;
     user_conn = user_path->user_conn;
     ctx = user_conn->ctx;
+    size_t buffer_capacity = ctx->args->net_cfg.user_recv_buf_size > 0
+        ? ctx->args->net_cfg.user_recv_buf_size
+        : XQC_PACKET_BUF_LEN;
+    unsigned char packet_buf[buffer_capacity];
+    if (packet_buf == NULL) {
+        printf("[error] allocate recv buffer failed\n");
+        return;
+    }
+
 
     do {
         /* recv quic packet from server */
-        recv_size = recvfrom(fd, packet_buf, sizeof(packet_buf), 0,
+        recv_size = recvfrom(fd, packet_buf, buffer_capacity, 0,
                              NULL, NULL);
         
         if (recv_size < 0 && get_sys_errno() == EAGAIN) {
@@ -1065,6 +1080,188 @@ xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_path_t *user_path, int fd)
 finish_recv:
     // printf("[stats] xqc_mini_cli_socket_read_handler, recv size:%zu\n", recv_sum);
     xqc_engine_finish_recv(ctx->engine);
+}
+
+static char *
+xqc_mini_cli_trim_space(char *text)
+{
+    if (text == NULL) {
+        return NULL;
+    }
+
+    while (*text && isspace((unsigned char)*text)) {
+        text++;
+    }
+
+    if (*text == '\0') {
+        return text;
+    }
+
+    char *end = text + strlen(text) - 1;
+    while (end > text && isspace((unsigned char)*end)) {
+        *end = '\0';
+        end--;
+    }
+
+    return text;
+}
+
+static void
+xqc_mini_cli_apply_interface_list(xqc_mini_cli_args_t *args, const char *value)
+{
+    if (value == NULL) {
+        return;
+    }
+
+    args->net_cfg.multi_interface_cnt = 0;
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        memset(args->net_cfg.multi_interface[i], 0, sizeof(args->net_cfg.multi_interface[i]));
+    }
+
+    char list_buf[256] = {0};
+    strncpy(list_buf, value, sizeof(list_buf) - 1);
+
+    char *token = strtok(list_buf, ", ");
+    while (token && args->net_cfg.multi_interface_cnt < MAX_PATH_CNT) {
+        char *trimmed = xqc_mini_cli_trim_space(token);
+        if (trimmed[0] != '\0') {
+            strncpy(args->net_cfg.multi_interface[args->net_cfg.multi_interface_cnt],
+                trimmed, XQC_MINI_INTERFACE_NAME_MAX_LEN - 1);
+            args->net_cfg.multi_interface_cnt++;
+        }
+        token = strtok(NULL, ", ");
+    }
+}
+
+static int
+xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return XQC_OK;
+    }
+
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        return XQC_OK;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        char *line_ptr = xqc_mini_cli_trim_space(line);
+        if (line_ptr[0] == '\0' || line_ptr[0] == '#') {
+            continue;
+        }
+
+        char *eq = strchr(line_ptr, '=');
+        if (eq == NULL) {
+            continue;
+        }
+
+        *eq = '\0';
+        char *key = xqc_mini_cli_trim_space(line_ptr);
+        char *value = xqc_mini_cli_trim_space(eq + 1);
+        if (key[0] == '\0' || value[0] == '\0') {
+            continue;
+        }
+
+        if (strcmp(key, "server_addr") == 0) {
+            strncpy(args->net_cfg.server_addr, value, sizeof(args->net_cfg.server_addr) - 1);
+            args->net_cfg.server_addr[sizeof(args->net_cfg.server_addr) - 1] = '\0';
+
+        } else if (strcmp(key, "server_port") == 0) {
+            char *endptr = NULL;
+            long port = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && port > 0 && port <= UINT16_MAX) {
+                args->net_cfg.server_port = (unsigned short)port;
+            }
+
+        } else if (strcmp(key, "stream_cnt") == 0) {
+            char *endptr = NULL;
+            long stream_cnt = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && stream_cnt > 0) {
+                if (stream_cnt > XQC_MINI_MAX_STREAMS) {
+                    stream_cnt = XQC_MINI_MAX_STREAMS;
+                }
+                args->req_stream_cnt = (int)stream_cnt;
+            }
+
+        }else if (strcmp(key, "send_data_len") == 0) {
+            char *endptr = NULL;
+            unsigned long long size = strtoull(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0') {
+                args->send_data_len = (size_t)size;
+            }
+
+        }
+        else if (strcmp(key, "method") == 0) {
+            char method_buf[8] = {0};
+            size_t len = strlen(value);
+            if (len >= sizeof(method_buf)) {
+                len = sizeof(method_buf) - 1;
+            }
+            for (size_t i = 0; i < len; i++) {
+                method_buf[i] = (char)toupper((unsigned char)value[i]);
+            }
+            if (strcmp(method_buf, "GET") == 0) {
+                args->req_cfg.method = REQUEST_METHOD_GET;
+            } else if (strcmp(method_buf, "POST") == 0) {
+                args->req_cfg.method = REQUEST_METHOD_POST;
+            }
+
+        } else if (strcmp(key, "cc") == 0) {
+            if (strcmp(value, "bbr") == 0) {
+                args->quic_cfg.cc = CC_TYPE_BBR;
+            } else if (strcmp(value, "cubic") == 0) {
+                args->quic_cfg.cc = CC_TYPE_CUBIC;
+            }
+
+        } else if (strcmp(key, "mp_sched") == 0) {
+            if (strcmp(value, "minrtt") == 0
+                || strcmp(value, "backup") == 0
+                || strcmp(value, "balanced") == 0
+                || strcmp(value, "rap") == 0
+                || strcmp(value, "act") == 0
+                || strcmp(value, "bw") == 0) {
+                memset(args->quic_cfg.mp_sched, 0, sizeof(args->quic_cfg.mp_sched));
+                strncpy(args->quic_cfg.mp_sched, value, sizeof(args->quic_cfg.mp_sched) - 1);
+            }
+ 
+        }
+        else if (strcmp(key, "interface") == 0 || strcmp(key, "interfaces") == 0) {
+            xqc_mini_cli_apply_interface_list(args, value);
+
+        } else if (strcmp(key, "kernel_sndbuf") == 0) {
+            char *endptr = NULL;
+            long size = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.kernel_sndbuf = (int)size;
+            }
+
+        } else if (strcmp(key, "kernel_revbuf") == 0) {
+            char *endptr = NULL;
+            long size = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.kernel_revbuf = (int)size;
+            }
+
+        } else if (strcmp(key, "user_send_buf_size") == 0) {
+            char *endptr = NULL;
+            unsigned long long size = strtoull(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.user_send_buf_size = (size_t)size;
+            }
+
+        } else if (strcmp(key, "user_recv_buf_size") == 0) {
+            char *endptr = NULL;
+            unsigned long long size = strtoull(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.user_recv_buf_size = (size_t)size;
+            }
+        }
+    }
+
+    fclose(fp);
+    return XQC_OK;
 }
 
 static void
@@ -1683,10 +1880,13 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
 {
     int opt;
 
+
     optind = 1;
+
 
      while ((opt = getopt(argc, argv, "i:s:a:p:m:M:u:o:l:")) != -1) {
         switch (opt) {
+        
         case 'i':
             if (args->net_cfg.multi_interface_cnt >= MAX_PATH_CNT) {
                 printf("[warn] exceed max path count %d, ignore interface %s\n",

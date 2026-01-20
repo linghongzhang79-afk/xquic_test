@@ -16,10 +16,10 @@ int init_args(xqc_mini_svr_args_t** args, xqc_mini_svr_ctx_t *ctx, int argc, cha
         return XQC_ERROR;
     }
 
-    ret = xqc_mini_svr_parse_cmd_args(*args, argc, argv);
-    if (ret != XQC_OK) {
-        return XQC_ERROR;
-    }
+    // ret = xqc_mini_svr_parse_cmd_args(*args, argc, argv);
+    // if (ret != XQC_OK) {
+    //     return XQC_ERROR;
+    // }
     /* create & init engine to ctx->engine */
     ret = xqc_mini_svr_init_xquic_engine(ctx, *args);
     if (ret < 0) {

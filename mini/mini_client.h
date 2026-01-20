@@ -38,7 +38,7 @@
 #define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
 #define DEFAULT_HOST "test.xquic.com"
-#define MINI_CONFIG_FILE "client_config.txt"
+
 
 #define SESSION_TICKET_BUF_MAX_SIZE 8192
 #define TRANSPORT_PARAMS_MAX_SIZE 8192
@@ -72,6 +72,7 @@ typedef struct xqc_mini_cli_net_config_s {
     int                 kernel_sndbuf;
     int                 kernel_revbuf;
     size_t              user_send_buf_size;
+    size_t              user_recv_buf_size;
 
 
 

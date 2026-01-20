@@ -16,8 +16,8 @@ int init_args(xqc_mini_cli_args_t** args, xqc_mini_cli_ctx_t *ctx,int argc, char
     ret = xqc_mini_cli_init_env(ctx, *args);
     if (ret < 0) return XQC_ERROR;
 
-    ret = xqc_mini_cli_parse_cmd_args(*args, argc, argv);
-    if (ret != XQC_OK) return XQC_ERROR;
+    //ret = xqc_mini_cli_parse_cmd_args(*args, argc, argv);
+    //if (ret != XQC_OK) return XQC_ERROR;
 
     ret = xqc_mini_cli_init_xquic_engine(ctx, *args);
     if (ret < 0) {

@@ -36,6 +36,13 @@ typedef struct xqc_mini_svr_net_config_s
 
     /* idle persist timeout */
     int     conn_timeout;
+
+    
+    int     kernel_sndbuf;
+    int     kernel_revbuf;
+    size_t  user_send_buf_size;
+    size_t  user_recv_buf_size;
+
 } xqc_mini_svr_net_config_t;
 
 /**
@@ -77,6 +84,7 @@ typedef struct xqc_mini_svr_quic_config_s
 #define SOURCE_DIR  "."
 #define PRIV_KEY_PATH "server.key"
 #define CERT_PEM_PATH "server.crt"
+#define MINI_SERVER_CONFIG_FILE "server_config.txt"
 
 typedef struct xqc_mini_svr_env_config_s {
     /* log config */
@@ -165,8 +173,9 @@ int xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[
 xqc_mini_svr_user_conn_t * xqc_mini_svr_create_user_conn(xqc_mini_svr_ctx_t *ctx);
 void xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args);
 
-static int xqc_mini_svr_init_socket(int family, uint16_t port, struct sockaddr *local_addr,
-    socklen_t local_addrlen);
+static int xqc_mini_svr_init_socket(int family, struct sockaddr *local_addr,
+    socklen_t local_addrlen, const xqc_mini_svr_net_config_t *cfg);
+
 
 static void xqc_mini_svr_socket_event_callback(int fd, short what, void *arg);
 void xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx);
