@@ -21,7 +21,7 @@
 #define SERVER_DEFAULT_FILE "server_data.bin"
 #define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
-#define XQC_PACKET_BUF_LEN 4096
+#define XQC_PACKET_BUF_LEN 65536
 
 /**
  * net config definition
@@ -161,11 +161,14 @@ int xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t 
 int xqc_mini_svr_init_env(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args);
 
 int xqc_mini_svr_init_engine_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args);
-
+int xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[]);
+xqc_mini_svr_user_conn_t * xqc_mini_svr_create_user_conn(xqc_mini_svr_ctx_t *ctx);
 void xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args);
 
 static int xqc_mini_svr_init_socket(int family, uint16_t port, struct sockaddr *local_addr,
     socklen_t local_addrlen);
 
 static void xqc_mini_svr_socket_event_callback(int fd, short what, void *arg);
+void xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx);
+void xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn);
 #endif

@@ -38,13 +38,14 @@
 #define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
 #define DEFAULT_HOST "test.xquic.com"
+#define MINI_CONFIG_FILE "client_config.txt"
 
 #define SESSION_TICKET_BUF_MAX_SIZE 8192
 #define TRANSPORT_PARAMS_MAX_SIZE 8192
 #define TOKEN_MAX_SIZE 8192
 #define MAX_PATH_CNT 2
 #define XQC_MINI_MAX_STREAMS 16
-#define XQC_PACKET_BUF_LEN 1500
+#define XQC_PACKET_BUF_LEN 65536
 #define XQC_MINI_PATH_ID_INVALID ((uint64_t)-1)
 #define XQC_MINI_INTERFACE_NAME_MAX_LEN 64
 
@@ -68,6 +69,11 @@ typedef struct xqc_mini_cli_net_config_s {
 
     int                 multi_interface_cnt;
     char                multi_interface[MAX_PATH_CNT][XQC_MINI_INTERFACE_NAME_MAX_LEN];
+    int                 kernel_sndbuf;
+    int                 kernel_revbuf;
+    size_t              user_send_buf_size;
+
+
 
     // /* server addr info */
     // struct sockaddr    *addr;
@@ -317,4 +323,6 @@ xqc_mini_cli_user_conn_t *xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
 
 void xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn);
 void xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn);
+
+int xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[]);
 #endif

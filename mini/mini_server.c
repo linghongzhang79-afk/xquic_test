@@ -1,7 +1,7 @@
 #include "mini_server.h"
 #include <stdint.h>
 
-static int xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[]);
+
 void
 xqc_mini_svr_init_ssl_config(xqc_engine_ssl_config_t  *ssl_cfg, xqc_mini_svr_args_t *args)
 {
@@ -71,7 +71,7 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
 }
 
 /*f参数用于客户端未指定GET文件时，默认的回传文件，而d是数据目录*/
-static int
+int
 xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[])
 {
     int opt;
@@ -128,17 +128,17 @@ xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 
     ctx->args = args;
     /* init log writer fd */
-    ctx->log_fd = xqc_mini_svr_open_log_file(ctx);
-    if (ctx->log_fd < 0) {
-        printf("[error] open log file failed\n");
-        return XQC_ERROR;
-    }
-    /* init keylog writer fd */
-    ctx->keylog_fd = xqc_mini_svr_open_keylog_file(ctx);
-    if (ctx->keylog_fd < 0) {
-        printf("[error] open keylog file failed\n");
-        return XQC_ERROR;
-    }
+    // ctx->log_fd = xqc_mini_svr_open_log_file(ctx);
+    // if (ctx->log_fd < 0) {
+    //     printf("[error] open log file failed\n");
+    //     return XQC_ERROR;
+    // }
+    // /* init keylog writer fd */
+    // ctx->keylog_fd = xqc_mini_svr_open_keylog_file(ctx);
+    // if (ctx->keylog_fd < 0) {
+    //     printf("[error] open keylog file failed\n");
+    //     return XQC_ERROR;
+    // }
     return XQC_OK;
 }
 
@@ -151,12 +151,16 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
 {
     static xqc_engine_callback_t callback = {
         .set_event_timer = xqc_mini_svr_set_event_timer,
-        .log_callbacks = {
-            .xqc_log_write_err = xqc_mini_svr_write_log_file,
-            .xqc_log_write_stat = xqc_mini_svr_write_log_file,
-            .xqc_qlog_event_write = xqc_mini_svr_write_qlog_file
-        },
-        .keylog_cb = xqc_mini_svr_keylog_cb,
+        // .log_callbacks = {
+        //     .xqc_log_write_err = xqc_mini_svr_write_log_file,
+        //     .xqc_log_write_stat = xqc_mini_svr_write_log_file,
+        //     .xqc_qlog_event_write = xqc_mini_svr_write_qlog_file
+        // },
+        // .keylog_cb = xqc_mini_svr_keylog_cb,
+
+        /* disable log/keylog output for the mini server */
+        .log_callbacks = {0},
+        .keylog_cb = NULL,
     };
 
     static xqc_transport_callbacks_t transport_cbs = {
@@ -267,7 +271,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .cong_ctrl_callback = ccc,
         .cc_params = {
             .customize_on = 1,
-            .init_cwnd = 96,
+            .init_cwnd = 32,
             .bbr_enable_lt_bw = 1,
         },
         .spurious_loss_detect_on = 1,
@@ -592,60 +596,60 @@ xqc_mini_cli_on_connection_finish(xqc_mini_svr_user_conn_t *user_conn)
     }
 }
 
-int
-main(int argc, char *argv[])
-{
-    int ret;
-    xqc_mini_svr_ctx_t svr_ctx = {0}, *ctx = &svr_ctx;
-    xqc_mini_svr_args_t *args = NULL;
-    xqc_mini_svr_user_conn_t *user_conn = NULL;
+// int
+// main(int argc, char *argv[])
+// {
+//     int ret;
+//     xqc_mini_svr_ctx_t svr_ctx = {0}, *ctx = &svr_ctx;
+//     xqc_mini_svr_args_t *args = NULL;
+//     xqc_mini_svr_user_conn_t *user_conn = NULL;
 
-    args = calloc(1, sizeof(xqc_mini_svr_args_t));
-    if (args == NULL) {
-        printf("[error] calloc args failed\n");
-        goto exit;
-    }
+//     args = calloc(1, sizeof(xqc_mini_svr_args_t));
+//     if (args == NULL) {
+//         printf("[error] calloc args failed\n");
+//         goto exit;
+//     }
 
-    /* init env (for windows) */
-    xqc_platform_init_env();
+//     /* init env (for windows) */
+//     xqc_platform_init_env();
 
-    /* init server environment */
-    ret = xqc_mini_svr_init_env(ctx, args);
-    if (ret < 0) {
-        printf("[error] init server environment failed\n");
-        goto exit;
-    }
+//     /* init server environment */
+//     ret = xqc_mini_svr_init_env(ctx, args);
+//     if (ret < 0) {
+//         printf("[error] init server environment failed\n");
+//         goto exit;
+//     }
 
-    ret = xqc_mini_svr_parse_cmd_args(args, argc, argv);
-    if (ret != XQC_OK) {
-        goto exit;
-    }
-    /* create & init engine to ctx->engine */
-    ret = xqc_mini_svr_init_xquic_engine(ctx, args);
-    if (ret < 0) {
-        printf("[error] init xquic engine failed\n");
-        goto exit;
-    }
+//     ret = xqc_mini_svr_parse_cmd_args(args, argc, argv);
+//     if (ret != XQC_OK) {
+//         goto exit;
+//     }
+//     /* create & init engine to ctx->engine */
+//     ret = xqc_mini_svr_init_xquic_engine(ctx, args);
+//     if (ret < 0) {
+//         printf("[error] init xquic engine failed\n");
+//         goto exit;
+//     }
 
-    /* init engine ctx */
-    ret = xqc_mini_svr_init_engine_ctx(ctx, args);
-    if (ret < 0) {
-        printf("[error] init engine ctx failed\n");
-        goto exit;
-    }
+//     /* init engine ctx */
+//     ret = xqc_mini_svr_init_engine_ctx(ctx, args);
+//     if (ret < 0) {
+//         printf("[error] init engine ctx failed\n");
+//         goto exit;
+//     }
 
-    /* initiate user_conn */
-    user_conn = xqc_mini_svr_create_user_conn(ctx);
+//     /* initiate user_conn */
+//     user_conn = xqc_mini_svr_create_user_conn(ctx);
 
-    /* start event loop */
-    event_base_dispatch(ctx->eb);
+//     /* start event loop */
+//     event_base_dispatch(ctx->eb);
 
-exit:
-    xqc_engine_destroy(ctx->engine);
-    xqc_mini_svr_free_ctx(ctx);
-    if (user_conn) {
-        xqc_mini_svr_free_user_conn(user_conn);
-    }
+// exit:
+//     xqc_engine_destroy(ctx->engine);
+//     xqc_mini_svr_free_ctx(ctx);
+//     if (user_conn) {
+//         xqc_mini_svr_free_user_conn(user_conn);
+//     }
 
-    return 0;
-}
+//     return 0;
+// }

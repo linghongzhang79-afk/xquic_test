@@ -5,13 +5,13 @@
 #include <ctype.h>
 #include <strings.h>
 
-#define CHUNK_SIZE (4 * 1024)
+#define CHUNK_SIZE (8 * 1024)
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 
 static void xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data);
 static void xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data);
-static int xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[]);
+
 static void xqc_mini_cli_dump_path_bindings(xqc_mini_cli_user_conn_t *user_conn);
 static int xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn,
     xqc_mini_cli_user_path_t *path);
@@ -21,6 +21,7 @@ static int xqc_mini_cli_bind_to_interface(int fd, const char *interface_name, in
 static int xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path);
 static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen,
     char *buf, size_t buflen);
+static int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
 static void
 xqc_mini_cli_notify_upload_finished(xqc_mini_cli_user_stream_t *user_stream)
 {
@@ -116,6 +117,9 @@ xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
             .xqc_qlog_event_write = xqc_mini_cli_write_qlog_file
         },
         .keylog_cb = xqc_mini_cli_keylog_cb,
+        /* disable log/keylog output for the mini client */
+        // .log_callbacks = {0},
+        // .keylog_cb = NULL,
     };
 
     static xqc_transport_callbacks_t transport_cbs = {
@@ -189,6 +193,9 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         memset(args->net_cfg.multi_interface[i], 0, sizeof(args->net_cfg.multi_interface[i]));
     }
+    args->net_cfg.kernel_sndbuf = 16 * 1024 * 1024;
+    args->net_cfg.user_send_buf_size = CHUNK_SIZE;
+
     strncpy(args->net_cfg.server_addr, DEFAULT_IP, sizeof(args->net_cfg.server_addr) - 1);
     args->net_cfg.server_addr[sizeof(args->net_cfg.server_addr) - 1] = '\0';
     args->net_cfg.server_port = DEFAULT_PORT;
@@ -202,8 +209,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->quic_cfg.groups, XQC_TLS_GROUPS, TLS_GROUPS_LEN - 1);
     args->quic_cfg.multipath = 1;
     strncpy(args->quic_cfg.mp_sched, "balanced", sizeof(args->quic_cfg.mp_sched));
-    args->quic_cfg.cc = CC_TYPE_CUBIC;
-
+    args->quic_cfg.cc = CC_TYPE_BBR;
 
     /* init environmen args */
     // args->env_cfg.log_level = XQC_LOG_DEBUG;
@@ -237,7 +243,7 @@ xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 
     ctx->args = args;
 
-    /* init log writer fd */
+    // /* init log writer fd */
     ctx->log_fd = xqc_mini_cli_open_log_file(ctx);
     if (ctx->log_fd < 0) {
         printf("[error] open log file failed\n");
@@ -322,8 +328,8 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     memset(settings, 0, sizeof(xqc_conn_settings_t));
     settings->cong_ctrl_callback = ccc;
     settings->cc_params.customize_on = 1;
-    settings->cc_params.init_cwnd = 96;
-    settings->so_sndbuf = 1024*1024;
+    settings->cc_params.init_cwnd = 32;
+    //settings->so_sndbuf = 1024*1024;
     settings->proto_version = XQC_VERSION_V1;
     settings->spurious_loss_detect_on = 1;
     settings->scheduler_callback = sched;
@@ -534,6 +540,10 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
     // }
     unsigned char *buffer = user_stream->send_buffer;
     xqc_mini_cli_ctx_t *ctx = user_stream->user_conn->ctx;
+    size_t buffer_capacity = ctx->args->net_cfg.user_send_buf_size > 0
+        ? ctx->args->net_cfg.user_send_buf_size
+        : CHUNK_SIZE;
+
     if (user_stream->file_size == 0) {
         ssize_t n = xqc_h3_request_send_body(h3_request, NULL, 0, 1);
         if (n < 0) {
@@ -559,7 +569,7 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
             // }
             
             size_t remaining = user_stream->file_size - user_stream->total_sent;
-            size_t chunk = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+            size_t chunk = remaining < buffer_capacity ? remaining : buffer_capacity;
 
             if (chunk == 0) {
                 break;
@@ -591,12 +601,21 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         size_t bytes_left_in_buffer = user_stream->buffered_len - user_stream->buffered_sent;
         int fin = (user_stream->total_sent + bytes_left_in_buffer >= user_stream->file_size) ? 1 : 0;
 
+        size_t prev_total_sent = user_stream->total_sent;
+        size_t prev_buffered_sent = user_stream->buffered_sent;
+
          ssize_t n = xqc_h3_request_send_body(h3_request,
             buffer + user_stream->buffered_sent, bytes_left_in_buffer, fin);
         if (n == -XQC_EAGAIN) {
             //ctx->args->net_cfg.last_socket_time = xqc_now();
             //printf("[info] send paused at start, waiting for write_notify\n");
-            break;
+            //break;
+            xqc_engine_main_logic(user_stream->user_conn->ctx->engine);
+            if (user_stream->total_sent == prev_total_sent
+                && user_stream->buffered_sent == prev_buffered_sent) {
+                break;
+            }
+            continue;
         }
         if (n < 0) {
             printf("[error] send body failed: %zd\n", n);
@@ -611,7 +630,7 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
         //     user_stream->file_size,
         //     user_stream->chunk_offset);
         ctx->args->net_cfg.last_socket_time = xqc_now();
-        xqc_engine_main_logic(user_stream->user_conn->ctx->engine);
+        //xqc_engine_main_logic(user_stream->user_conn->ctx->engine);
 
         if (user_stream->buffered_sent < user_stream->buffered_len) {
             continue;
@@ -717,7 +736,11 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
         return XQC_OK;
     }
     if (user_stream->file_size > 0) {
-        user_stream->send_buffer = malloc(CHUNK_SIZE);
+        size_t buffer_capacity = user_conn->ctx->args->net_cfg.user_send_buf_size > 0
+            ? user_conn->ctx->args->net_cfg.user_send_buf_size
+            : CHUNK_SIZE;
+        user_stream->send_buffer = malloc(buffer_capacity);
+
         if (user_stream->send_buffer == NULL) {
             perror("malloc");
             return -1;
@@ -729,7 +752,7 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     xqc_mini_cli_request_send(user_stream->h3_request, user_stream);
 
     /* generate engine main log to send packets */
-    //xqc_engine_main_logic(user_conn->ctx->engine);
+    xqc_engine_main_logic(user_conn->ctx->engine);
     return XQC_OK;
 }
 
@@ -930,15 +953,20 @@ xqc_mini_cli_init_socket(xqc_mini_cli_user_path_t *user_path)
     }
 #endif
 
-    size = 16 * 1024 * 1024;
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
-        printf("[error] setsockopt failed, errno: %d\n", get_sys_errno());
-        goto err;
+    if (ctx->args->net_cfg.kernel_revbuf > 0) {
+        size = ctx->args->net_cfg.kernel_revbuf;
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
+            printf("[error] setsockopt failed, errno: %d\n", get_sys_errno());
+            goto err;
+        }
     }
 
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(int)) < 0) {
-        printf("[error] setsockopt failed, errno: %d\n", get_sys_errno());
-        goto err;
+    if (ctx->args->net_cfg.kernel_sndbuf > 0) {
+        size = ctx->args->net_cfg.kernel_sndbuf;
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(int)) < 0) {
+            printf("[error] setsockopt failed, errno: %d\n", get_sys_errno());
+            goto err;
+        }
     }
 
 #if !defined(__APPLE__)
@@ -976,6 +1004,8 @@ xqc_mini_cli_socket_write_handler(xqc_mini_cli_user_path_t *user_path, int fd)
     printf("[stats] socket write handler\n");
 }
 
+//实际接收QUIC数据包的函数，是传输层和QUIC层的交付，
+// 后面回调里面xqc_mini_cli_h3_request_read_notify仅是对接收的包进行处理，不需要再读取socket了，是QUIC层和应用层的交互
 void
 xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_path_t *user_path, int fd)
 {
@@ -1589,66 +1619,66 @@ xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
     }
 }
 
-int main(int argc, char *argv[])
-{
-    int ret;
-    xqc_mini_cli_ctx_t cli_ctx = {0}, *ctx = &cli_ctx;
-    xqc_mini_cli_args_t *args = NULL;
-    xqc_mini_cli_user_conn_t *user_conn = NULL;
+// int main(int argc, char *argv[])
+// {
+//     int ret;
+//     xqc_mini_cli_ctx_t cli_ctx = {0}, *ctx = &cli_ctx;
+//     xqc_mini_cli_args_t *args = NULL;
+//     xqc_mini_cli_user_conn_t *user_conn = NULL;
 
-    args = calloc(1, sizeof(xqc_mini_cli_args_t));
-    if (args == NULL) {
-        printf("[error] calloc args failed\n");
-        goto exit;
-    }
+//     args = calloc(1, sizeof(xqc_mini_cli_args_t));
+//     if (args == NULL) {
+//         printf("[error] calloc args failed\n");
+//         goto exit;
+//     }
 
-    /* init env (for windows) */
-    xqc_platform_init_env();
+//     /* init env (for windows) */
+//     xqc_platform_init_env();
 
-    /* init client environment (ctx & args) */
-    ret = xqc_mini_cli_init_env(ctx, args);
-    if (ret < 0) {
-        goto exit;
-    }
-    ret = xqc_mini_cli_parse_cmd_args(args, argc, argv);
-    if (ret != XQC_OK) {
-        goto exit;
-    }
-    /* init client engine */
-    ret = xqc_mini_cli_init_xquic_engine(ctx, args);
-    if (ret < 0) {
-        printf("[error] init xquic engine failed\n");
-        goto exit;
-    }
+//     /* init client environment (ctx & args) */
+//     ret = xqc_mini_cli_init_env(ctx, args);
+//     if (ret < 0) {
+//         goto exit;
+//     }
+//     ret = xqc_mini_cli_parse_cmd_args(args, argc, argv);
+//     if (ret != XQC_OK) {
+//         goto exit;
+//     }
+//     /* init client engine */
+//     ret = xqc_mini_cli_init_xquic_engine(ctx, args);
+//     if (ret < 0) {
+//         printf("[error] init xquic engine failed\n");
+//         goto exit;
+//     }
 
-    /* init engine ctx */
-    ret = xqc_mini_cli_init_engine_ctx(ctx);
-    if (ret < 0) {
-        printf("[error] init engine ctx failed\n");
-        goto exit;
-    }
+//     /* init engine ctx */
+//     ret = xqc_mini_cli_init_engine_ctx(ctx);
+//     if (ret < 0) {
+//         printf("[error] init engine ctx failed\n");
+//         goto exit;
+//     }
 
-    user_conn = xqc_mini_cli_user_conn_create(ctx);
-    if (user_conn == NULL) {
-        printf("[error] init user_conn failed.\n");
-        goto exit;
-    }
+//     user_conn = xqc_mini_cli_user_conn_create(ctx);
+//     if (user_conn == NULL) {
+//         printf("[error] init user_conn failed.\n");
+//         goto exit;
+//     }
 
-    /* cli main process: build connection, process request, etc. */
-    xqc_mini_cli_main_process(user_conn, ctx);
+//     /* cli main process: build connection, process request, etc. */
+//     xqc_mini_cli_main_process(user_conn, ctx);
 
-    /* start event loop */
-    event_base_dispatch(ctx->eb);
+//     /* start event loop */
+//     event_base_dispatch(ctx->eb);
 
-exit:
-    xqc_engine_destroy(ctx->engine);
-    xqc_mini_cli_on_connection_finish(user_conn);
-    xqc_mini_cli_free_ctx(ctx);
-    xqc_mini_cli_free_user_conn(user_conn);
+// exit:
+//     xqc_engine_destroy(ctx->engine);
+//     xqc_mini_cli_on_connection_finish(user_conn);
+//     xqc_mini_cli_free_ctx(ctx);
+//     xqc_mini_cli_free_user_conn(user_conn);
 
-    return 0;
-}
-static int
+//     return 0;
+// }
+int
 xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
 {
     int opt;
