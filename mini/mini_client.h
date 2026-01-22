@@ -202,6 +202,8 @@ typedef struct xqc_mini_cli_user_path_s {
 
     struct event            *ev_socket;
     char                    interface_name[XQC_MINI_INTERFACE_NAME_MAX_LEN];
+    //用于测试路径是否失效
+    int                     consecutive_write_failures;
 } xqc_mini_cli_user_path_t;
 
 typedef struct xqc_mini_cli_user_conn_s {
@@ -225,6 +227,7 @@ typedef struct xqc_mini_cli_user_conn_s {
 
 
     struct event            *ev_timeout;
+    struct event            *ev_path_retry;
 
 } xqc_mini_cli_user_conn_t;
 
@@ -276,6 +279,7 @@ typedef struct xqc_mini_cli_user_stream_s {
 
 
 void xqc_mini_cli_init_engine_ssl_config(xqc_engine_ssl_config_t *ssl_cfg, xqc_mini_cli_args_t *args);
+void xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn);
 
 void xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *tcb, xqc_mini_cli_args_t *args);
 

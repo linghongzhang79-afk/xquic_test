@@ -23,6 +23,8 @@ static int xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path);
 static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen,
     char *buf, size_t buflen);
 static int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
+
+//统计并输出所有流上传完成的汇总信息
 static void
 xqc_mini_cli_notify_upload_finished(xqc_mini_cli_user_stream_t *user_stream)
 {
@@ -49,6 +51,7 @@ xqc_mini_cli_notify_upload_finished(xqc_mini_cli_user_stream_t *user_stream)
     }
 }
 
+//根据并发流索引计算对应的文件分片偏移与长度
 static void
 xqc_mini_cli_compute_stream_segment(const xqc_mini_cli_user_conn_t *user_conn,
     int stream_index, size_t *offset, size_t *length)
@@ -106,7 +109,7 @@ xqc_mini_cli_init_engine_ssl_config(xqc_engine_ssl_config_t *ssl_cfg, xqc_mini_c
     ssl_cfg->groups = args->quic_cfg.groups;
 }
 
-
+//初始化引擎与传输层回调函数
 void
 xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *tcb, xqc_mini_cli_args_t *args)
 {
@@ -136,7 +139,7 @@ xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
     *cb = callback;
     *tcb = transport_cbs;
 }
-//对应教程里面的engine的初始化
+//初始化并创建 xquic 客户端引擎
 int
 xqc_mini_cli_init_xquic_engine(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 {
@@ -184,7 +187,7 @@ xqc_mini_cli_convert_text_to_sockaddr(int type,
     *saddr_len = sizeof(struct sockaddr_in);
     
 }
-
+//初始化客户端默认参数
 void
 xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
 {
@@ -235,6 +238,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     args->send_data_len = 0;
 }
 
+//初始化客户端上下文（事件循环、日志输出fd等）
 int
 xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 {
@@ -263,6 +267,7 @@ xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 }
 
 
+// 初始化客户端环境（参数、配置文件与上下文）
 int
 xqc_mini_cli_init_env(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 {
@@ -279,7 +284,7 @@ xqc_mini_cli_init_env(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 
     return ret;
 }
-
+// 根据配置选择多路径调度回调
 xqc_scheduler_callback_t
 xqc_mini_cli_get_sched_cb(xqc_mini_cli_args_t *args)
 {
@@ -304,7 +309,7 @@ xqc_mini_cli_get_sched_cb(xqc_mini_cli_args_t *args)
     }
     return sched;
 }
-
+// 根据配置选择拥塞控制回调
 xqc_cong_ctrl_callback_t
 xqc_mini_cli_get_cc_cb(xqc_mini_cli_args_t *args)
 {
@@ -322,6 +327,7 @@ xqc_mini_cli_get_cc_cb(xqc_mini_cli_args_t *args)
     return ccc;
 }
 
+// 初始化连接层设置（拥塞控制、多路径等）
 void
 xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args_t *args)
 {
@@ -345,7 +351,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->init_recv_window = 512*1024*1024;
     settings->multipath_version = XQC_MULTIPATH_10;
 }
-
+// 初始化 HTTP3 回调与上下文
 int
 xqc_mini_cli_init_alpn_ctx(xqc_mini_cli_ctx_t *ctx)
 {
@@ -375,7 +381,7 @@ xqc_mini_cli_init_alpn_ctx(xqc_mini_cli_ctx_t *ctx)
 
     return ret;
 }
-
+// 初始化引擎上下文（ALPN 等）
 int
 xqc_mini_cli_init_engine_ctx(xqc_mini_cli_ctx_t *ctx)
 {
@@ -386,7 +392,7 @@ xqc_mini_cli_init_engine_ctx(xqc_mini_cli_ctx_t *ctx)
 
     return ret;
 }
-
+// 释放客户端上下文资源
 void
 xqc_mini_cli_free_ctx(xqc_mini_cli_ctx_t *ctx)
 {
@@ -398,7 +404,7 @@ xqc_mini_cli_free_ctx(xqc_mini_cli_ctx_t *ctx)
         ctx->args = NULL;
     }
 }
-
+// 初始化 0-RTT（加密的） 相关数据（ticket/TP/token）
 void
 xqc_mini_cli_init_0rtt(xqc_mini_cli_args_t *args)
 {
@@ -417,7 +423,7 @@ xqc_mini_cli_init_0rtt(xqc_mini_cli_args_t *args)
         args->quic_cfg.token, TOKEN_MAX_SIZE);
     args->quic_cfg.token_len = ret > 0 ? ret : 0;
 }
-
+// 初始化连接级 SSL 配置
 void
 xqc_mini_cli_init_conn_ssl_config(xqc_conn_ssl_config_t *conn_ssl_config, xqc_mini_cli_args_t *args)
 {
@@ -433,6 +439,8 @@ xqc_mini_cli_init_conn_ssl_config(xqc_conn_ssl_config_t *conn_ssl_config, xqc_mi
         conn_ssl_config->transport_parameter_data_len = args->quic_cfg.transport_parameter_len;
     }
 }
+
+// 组装 HTTP/3 请求头
 int 
 xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
     xqc_mini_cli_req_config_t* req_cfg, size_t body_len,
@@ -529,7 +537,7 @@ xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
     
     return req_sz;
 }
-
+// 实际分片发送 HTTP/3 请求体
 int
 xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream_t *user_stream)
 {
@@ -660,6 +668,7 @@ xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream
     return XQC_OK;
 }
 
+// 创建并发送 HTTP/3 请求（头与体），调用xqc_mini_cli_request_send完成请求体的分片发送
 int
 xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_stream_t *user_stream, int stream_index)
 {
@@ -762,6 +771,7 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     return XQC_OK;
 }
 
+// 根据路径索引获取要绑定的网卡名称
 static const char *
 xqc_mini_cli_get_interface_for_path(xqc_mini_cli_user_conn_t *user_conn, int path_index)
 {
@@ -776,7 +786,7 @@ xqc_mini_cli_get_interface_for_path(xqc_mini_cli_user_conn_t *user_conn, int pat
 
     return net_cfg->multi_interface[path_index];
 }
-
+// 计算期望创建的路径数量
 static int
 xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -794,7 +804,7 @@ xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn)
     }
     return target;
 }
-
+// 查找一个未激活的路径槽位
 static xqc_mini_cli_user_path_t *
 xqc_mini_cli_find_inactive_path(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -806,7 +816,7 @@ xqc_mini_cli_find_inactive_path(xqc_mini_cli_user_conn_t *user_conn)
 
     return NULL;
 }
-
+// 准备路径结构及其 socket 与地址信息
 static int
 xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_path_t *path)
 {
@@ -835,6 +845,7 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
     path->is_active = 0;
     path->prepared = 0;
     path->path_id = XQC_MINI_PATH_ID_INVALID;
+    path->consecutive_write_failures = 0;
     memset(path->interface_name, 0, sizeof(path->interface_name));
     if (interface_name != NULL) {
         strncpy(path->interface_name, interface_name, sizeof(path->interface_name) - 1);
@@ -886,7 +897,7 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
 
     return XQC_OK;
 }
-
+// 输出当前激活路径与绑定信息
 static void
 xqc_mini_cli_dump_path_bindings(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -1002,7 +1013,7 @@ err:
     close(fd);
     return XQC_ERROR;
 }
-
+// 处理 socket 可写事件，现在没啥用
 void
 xqc_mini_cli_socket_write_handler(xqc_mini_cli_user_path_t *user_path, int fd)
 {
@@ -1082,6 +1093,7 @@ finish_recv:
     xqc_engine_finish_recv(ctx->engine);
 }
 
+// 去除字符串首尾空白字符
 static char *
 xqc_mini_cli_trim_space(char *text)
 {
@@ -1105,7 +1117,7 @@ xqc_mini_cli_trim_space(char *text)
 
     return text;
 }
-
+// 解析 interface 列表并写入配置
 static void
 xqc_mini_cli_apply_interface_list(xqc_mini_cli_args_t *args, const char *value)
 {
@@ -1132,7 +1144,7 @@ xqc_mini_cli_apply_interface_list(xqc_mini_cli_args_t *args, const char *value)
         token = strtok(NULL, ", ");
     }
 }
-
+// 读取并解析客户端配置文件
 static int
 xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
 {
@@ -1263,7 +1275,7 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
     fclose(fp);
     return XQC_OK;
 }
-
+// libevent socket 事件回调分发，查看socket是否可写或者可读
 static void
 xqc_mini_cli_socket_event_callback(int fd, short what, void *arg)
 {
@@ -1281,6 +1293,8 @@ xqc_mini_cli_socket_event_callback(int fd, short what, void *arg)
         exit(1);
     }
 }
+
+// 创建并初始化 QUIC 连接
 int
 xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -1320,6 +1334,7 @@ xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
 
 
 
+// 填充通配地址作为本地绑定地址
 static void
 xqc_mini_cli_fill_wildcard_local_addr(struct sockaddr *local_addr, socklen_t *addrlen)
 {
@@ -1331,6 +1346,7 @@ xqc_mini_cli_fill_wildcard_local_addr(struct sockaddr *local_addr, socklen_t *ad
     *addrlen = sizeof(struct sockaddr_in);
 }
 
+// 将 sockaddr 格式化为字符串 IP:port
 static void
 xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen, char *buf, size_t buflen)
 {
@@ -1370,6 +1386,7 @@ xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen, ch
     snprintf(buf, buflen, "af%d", addr->sa_family);
 }
 
+// 查询指定网卡的本地地址
 static int
 xqc_mini_cli_query_interface_addr(const char *interface_name, int desired_family,
     struct sockaddr_storage *storage, socklen_t *addrlen)
@@ -1440,6 +1457,7 @@ xqc_mini_cli_query_interface_addr(const char *interface_name, int desired_family
 #endif
 }
 
+// 根据接口名设置本地地址（失败则回退通配）
 static int
 xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path)
 {
@@ -1472,6 +1490,7 @@ xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path)
     return ret;
 }
 
+// 初始化路径并绑定 socket 到事件循环
 static int
 xqc_mini_cli_init_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_path_t *path,
     uint64_t path_id)
@@ -1513,7 +1532,7 @@ xqc_mini_cli_init_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_us
     return XQC_OK;
 }
 
-
+// 连接可创建新路径时的回调处理
 static void
 xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
 {
@@ -1565,6 +1584,7 @@ xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_dat
     printf("[stats] new path created, path_id=%"PRIu64"\n", new_path_id);
 }
 
+// 路径被移除时的清理回调
 static void
 xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 {
@@ -1593,6 +1613,7 @@ xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_use
                 path->fd = -1;
             }
             path->prepared = 0;
+            path->consecutive_write_failures = 0;
             path->path_id = XQC_MINI_PATH_ID_INVALID;
             printf("[stats] path removed, path_id=%"PRIu64"\n", path_id);
             xqc_mini_cli_dump_path_bindings(user_conn);
@@ -1600,6 +1621,8 @@ xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_use
         }
     }
 }
+
+// 客户端主流程：创建连接并发起请求
 int
 xqc_mini_cli_main_process(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_ctx_t *ctx)
 {
@@ -1638,7 +1661,7 @@ xqc_mini_cli_main_process(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_ctx_
     return XQC_OK;
 }
 
-
+// 创建并初始化用户连接结构
 xqc_mini_cli_user_conn_t *
 xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
 {
@@ -1757,6 +1780,8 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     return user_conn;
 }
 
+
+// 释放用户连接及其资源
 void
 xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -1790,6 +1815,7 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
     free(user_conn);
 }
 
+// 连接结束时清理事件与 socket
 void
 xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -1875,6 +1901,8 @@ xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
 
 //     return 0;
 // }
+
+// 解析命令行参数并写入配置，目前未使用该函数
 int
 xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
 {

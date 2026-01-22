@@ -356,6 +356,7 @@ ssize_t
 xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     const struct sockaddr *peer_addr, socklen_t peer_addrlen, void *conn_user_data)
 {
+    const int max_write_failures = 3;
     int fd = -1;
     ssize_t res = 0;
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)conn_user_data;
@@ -363,7 +364,10 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     xqc_mini_cli_user_path_t *user_path = NULL;
     
     for (int i = 0; i < MAX_PATH_CNT; i++) {
-        if (user_conn->paths[i].is_active && user_conn->paths[i].path_id == path_id) {
+        if (user_conn->paths[i].is_active
+            && user_conn->paths[i].consecutive_write_failures < max_write_failures
+            && user_conn->paths[i].path_id == path_id)
+        {
             user_path = &user_conn->paths[i];
             break;
         }
@@ -404,7 +408,18 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
 
     // printf("[report] xqc_mini_cli_write_socket_ex success size=%lu\n", size);
     if (res >= 0) {
+        user_path->consecutive_write_failures = 0;
         user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
+    }
+    else if (res != XQC_SOCKET_EAGAIN) {
+        user_path->consecutive_write_failures++;
+        if (user_path->consecutive_write_failures >= max_write_failures
+            && user_path->path_id != XQC_MINI_PATH_ID_INVALID)
+        {
+            printf("[warn] path_id=%"PRIu64" reached write failure threshold, closing path\n",
+                user_path->path_id);
+            xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, user_path->path_id);
+        }
     }
 
 

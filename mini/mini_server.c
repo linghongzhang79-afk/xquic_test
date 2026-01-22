@@ -1,6 +1,6 @@
 #include "mini_server.h"
 #include <stdint.h>
-
+// 去除字符串首尾空白字符
 static char *
 xqc_mini_svr_trim_space(char *text)
 {
@@ -25,16 +25,19 @@ xqc_mini_svr_trim_space(char *text)
     return text;
 }
 
+// 读取并解析服务器配置文件
 static int
 xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
 {
     if (path == NULL || path[0] == '\0') {
-        return XQC_OK;
+        return XQC_ERROR;
     }
 
     FILE *fp = fopen(path, "r");
     if (fp == NULL) {
-        return XQC_OK;
+        fprintf(stderr, "fopen failed: path='%s', errno=%d (%s)\n",
+            path, errno, strerror(errno));
+        return XQC_ERROR;
     }
 
     char line[512];
@@ -111,6 +114,7 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
 }
 
 
+// 初始化服务器 SSL 配置（证书/密钥/票据等）
 void
 xqc_mini_svr_init_ssl_config(xqc_engine_ssl_config_t  *ssl_cfg, xqc_mini_svr_args_t *args)
 {
@@ -143,7 +147,7 @@ xqc_mini_svr_init_ssl_config(xqc_engine_ssl_config_t  *ssl_cfg, xqc_mini_svr_arg
 
     // ssl_cfg.transport_params = tp;
 }
-
+// 初始化服务器默认参数
 void
 xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
 {
@@ -231,6 +235,8 @@ xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[])
 
     return XQC_OK;
 }
+
+// 初始化服务器上下文（事件循环/日志等）
 int
 xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 {
@@ -259,6 +265,7 @@ xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 /**
  * @brief init engine & transport callbacks
  */
+// 初始化引擎与传输层回调集合
 void
 xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *tcb,
     xqc_mini_svr_args_t *args)
@@ -291,6 +298,7 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
 /**
  * @brief init xquic server engine
  */
+// 创建并初始化 xquic 服务器引擎
 int
 xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 {
@@ -325,6 +333,7 @@ xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *arg
     return XQC_OK;
 }
 
+// 初始化服务器环境（参数、配置与上下文）
 int
 xqc_mini_svr_init_env(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 {
@@ -341,7 +350,7 @@ xqc_mini_svr_init_env(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 
     return ret;
 }
-
+// 根据配置选择拥塞控制回调
 xqc_cong_ctrl_callback_t
 xqc_mini_svr_get_cc_cb(xqc_mini_svr_args_t *args)
 {
@@ -358,7 +367,7 @@ xqc_mini_svr_get_cc_cb(xqc_mini_svr_args_t *args)
     }
     return ccc;
 }
-
+// 根据配置选择多路径调度回调
 xqc_scheduler_callback_t
 xqc_mini_svr_get_sched_cb(xqc_mini_svr_args_t *args)
 {
@@ -374,7 +383,7 @@ xqc_mini_svr_get_sched_cb(xqc_mini_svr_args_t *args)
     }
     return sched;
 }
-
+// 初始化连接层设置（拥塞控制、多路径等）
 void
 xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
 {
@@ -407,7 +416,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
     xqc_server_set_conn_settings(engine, &conn_settings);
 }
 
-/* create socket and bind port, 限制套接字对应的内核缓冲区大小 */
+// 创建并绑定 socket，同时设置内核缓冲区大小
 static int
 xqc_mini_svr_init_socket(int family, struct sockaddr *local_addr,
         socklen_t local_addrlen, const xqc_mini_svr_net_config_t *cfg)
@@ -473,7 +482,7 @@ err:
     close(fd);
     return -1;
 }
-
+// 创建 UDP socket 并绑定到指定地址
 static int
 xqc_mini_svr_create_socket(xqc_mini_svr_user_conn_t *user_conn, xqc_mini_svr_net_config_t* cfg)
 {
@@ -503,7 +512,7 @@ xqc_mini_svr_create_socket(xqc_mini_svr_user_conn_t *user_conn, xqc_mini_svr_net
 
     return 0;
 }
-
+// 初始化 HTTP/3(ALPN) 上下文
 int
 xqc_mini_svr_init_alpn_ctx(xqc_engine_t *engine)
 {
@@ -533,7 +542,7 @@ xqc_mini_svr_init_alpn_ctx(xqc_engine_t *engine)
 
     return ret;
 }
-
+// 初始化引擎上下文（连接配置与 ALPN）
 int
 xqc_mini_svr_init_engine_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 {
@@ -548,13 +557,14 @@ xqc_mini_svr_init_engine_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
     return ret;
 }
 
+// 处理 socket 可写事件
 void
 xqc_mini_svr_socket_write_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
 {
     DEBUG
     printf("[stats] socket write handler\n");
 }
-
+// 处理 socket 可读事件并投递给引擎
 void
 xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
 {
@@ -638,7 +648,7 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
     // ✅ 通知 QUIC 引擎本轮接收完成
     xqc_engine_finish_recv(ctx->engine);
 }
-
+// libevent socket 事件回调分发
 static void
 xqc_mini_svr_socket_event_callback(int fd, short what, void *arg)
 {
@@ -655,7 +665,7 @@ xqc_mini_svr_socket_event_callback(int fd, short what, void *arg)
         exit(1);
     }
 }
-
+// 释放服务器上下文资源
 void
 xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx)
 {
@@ -669,6 +679,7 @@ xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx)
 
 }
 
+// 释放用户连接资源
 void
 xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
 {
@@ -685,7 +696,7 @@ xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
         user_conn = NULL;
     }
 }
-
+// 创建并初始化用户连接结构
 xqc_mini_svr_user_conn_t *
 xqc_mini_svr_create_user_conn(xqc_mini_svr_ctx_t *ctx)
 {
@@ -715,6 +726,7 @@ error:
     return NULL;
 }
 
+// 连接结束时清理事件
 void
 xqc_mini_cli_on_connection_finish(xqc_mini_svr_user_conn_t *user_conn)
 {

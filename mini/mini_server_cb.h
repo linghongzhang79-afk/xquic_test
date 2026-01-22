@@ -71,53 +71,75 @@ typedef struct xqc_mini_svr_user_stream_s {
 
 
 /* engine callbacks */
+// 引擎定时器事件回调，驱动引擎主逻辑
 void xqc_mini_svr_engine_cb(int fd, short what, void *arg);
 
+// 设置引擎定时器触发时间
 void xqc_mini_svr_set_event_timer(xqc_msec_t wake_after, void *arg);
 
+// 打开日志文件
 int xqc_mini_svr_open_log_file(void *arg);
 
+// 写入日志内容
 void xqc_mini_svr_write_log_file(xqc_log_level_t lvl, const void *buf, size_t size, void *arg);
 
+// 关闭日志文件
 void xqc_mini_svr_close_log_file(void *arg);
 
+// 写入 qlog 日志事件
 void xqc_mini_svr_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *arg);
 
+// 打开 TLS keylog 文件
 int xqc_mini_svr_open_keylog_file(void *arg);
 
+// TLS keylog 回调
 void xqc_mini_svr_keylog_cb(const xqc_cid_t *scid, const char *line, void *arg);
 
+// 关闭 TLS keylog 文件
 void xqc_mini_svr_close_keylog_file(void *arg);
 
+// 连接接收回调（server_accept）
 int xqc_mini_svr_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
     void *eng_user_data);
 
+// 发送 UDP 数据包
 ssize_t xqc_mini_svr_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer_addr,
     socklen_t peer_addrlen, void *arg);
 
+// 根据路径 ID 发送 UDP 数据包
 ssize_t xqc_mini_svr_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size, 
     const struct sockaddr *peer_addr,socklen_t peer_addrlen, void *arg);
 
+// 连接 CID 更新通知
 void xqc_mini_svr_conn_update_cid_notify(xqc_connection_t *conn, const xqc_cid_t *retire_cid,
     const xqc_cid_t *new_cid, void *user_data);
 
 /* h3 callbacks */
+// HTTP/3 连接创建回调
 int xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     void *conn_user_data);
 
+// HTTP/3 连接关闭回调
 int xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     void *conn_user_data);
 
+// HTTP/3 握手完成回调
 void xqc_mini_svr_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_data);
 
+// HTTP/3 请求创建回调
 int xqc_mini_svr_h3_request_create_notify(xqc_h3_request_t *h3_request, void *strm_user_data);
 
+// HTTP/3 请求关闭回调
 int xqc_mini_svr_h3_request_close_notify(xqc_h3_request_t *h3_request, void *strm_user_data);
 
+// HTTP/3 请求读事件回调
 int xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
     void *strm_user_data);
 
+// HTTP/3 请求写事件回调
 int xqc_mini_svr_h3_request_write_notify(xqc_h3_request_t *h3_request, void *strm_user_data);
 
+// 发送响应体数据
 int xqc_mini_svr_send_body(xqc_mini_svr_user_stream_t *user_stream);
+
 #endif
