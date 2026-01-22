@@ -549,3 +549,20 @@ xqc_mini_cli_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid, vo
     printf("[stats] xqc_conn_is_ready_to_send_early_data:%d\n", xqc_conn_is_ready_to_send_early_data(conn));
     return XQC_OK;
 }
+void
+xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
+{
+    xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)arg;
+    struct timeval tv;
+
+    if (user_conn == NULL || user_conn->ctx == NULL) {
+        return;
+    }
+
+    xqc_mini_cli_try_rebuild_paths(user_conn);
+
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    event_add(user_conn->ev_path_retry, &tv);
+}
+

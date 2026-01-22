@@ -1532,56 +1532,63 @@ xqc_mini_cli_init_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_us
     return XQC_OK;
 }
 
-// 连接可创建新路径时的回调处理
-static void
-xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
+static int
+xqc_mini_cli_create_new_path(xqc_mini_cli_user_conn_t *user_conn)
 {
-    xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)conn_user_data;
     if (user_conn == NULL || user_conn->ctx == NULL) {
-        return;
+        return XQC_ERROR;
     }
 
     if (!user_conn->ctx->args->quic_cfg.multipath) {
-        return;
+        return XQC_ERROR;
     }
 
     int target_cnt = xqc_mini_cli_get_target_path_count(user_conn);
     if (user_conn->total_path_cnt >= target_cnt) {
         printf("[warn] reach max path count, ignore new path creation\n");
-        return;
+        return XQC_ERROR;
     }
 
     xqc_mini_cli_user_path_t *path = xqc_mini_cli_find_inactive_path(user_conn);
     if (path == NULL) {
         printf("[warn] no inactive path slot available for new path\n");
-        return;
+        return XQC_ERROR;
     }
 
     uint64_t new_path_id = 0;
-    int ret = xqc_conn_create_path(user_conn->ctx->engine, cid, &new_path_id, 0);
+    int ret = xqc_conn_create_path(user_conn->ctx->engine, &user_conn->cid, &new_path_id, 0);
     if (ret != XQC_OK) {
         printf("[error] xqc_conn_create_path error:%d\n", ret);
-        return;
+        return ret;
     }
     if (!path->prepared) {
         ret = xqc_mini_cli_prepare_user_path(user_conn, path);
         if (ret != XQC_OK) {
             printf("[error] prepare new path socket failed, ret:%d\n", ret);
-            xqc_conn_close_path(user_conn->ctx->engine, cid, new_path_id);
-            return;
+            xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, new_path_id);
+            return ret;
         }
     }
 
     ret = xqc_mini_cli_init_user_path(user_conn, path, new_path_id);
     if (ret != XQC_OK) {
         printf("[error] init new path failed, ret:%d\n", ret);
-        xqc_conn_close_path(user_conn->ctx->engine, cid, new_path_id);
-        return;
+        xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, new_path_id);
+        return ret;
     }
 
     user_conn->total_path_cnt++;
     user_conn->active_path_cnt++;
     printf("[stats] new path created, path_id=%"PRIu64"\n", new_path_id);
+    return XQC_OK;
+}
+
+// 连接可创建新路径时的回调处理
+static void
+xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
+{
+    xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)conn_user_data;
+    (void)xqc_mini_cli_create_new_path(user_conn);
 }
 
 // 路径被移除时的清理回调
@@ -1617,6 +1624,25 @@ xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_use
             path->path_id = XQC_MINI_PATH_ID_INVALID;
             printf("[stats] path removed, path_id=%"PRIu64"\n", path_id);
             xqc_mini_cli_dump_path_bindings(user_conn);
+            break;
+        }
+    }
+}
+
+void
+xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL) {
+        return;
+    }
+
+    if (!user_conn->ctx->args->quic_cfg.multipath) {
+        return;
+    }
+
+    int target_cnt = xqc_mini_cli_get_target_path_count(user_conn);
+    while (user_conn->total_path_cnt < target_cnt) {
+        if (xqc_mini_cli_create_new_path(user_conn) != XQC_OK) {
             break;
         }
     }
@@ -1682,6 +1708,12 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     tv.tv_usec = 0;
     user_conn->ev_timeout = event_new(ctx->eb, -1, 0, xqc_mini_cli_timeout_callback, user_conn);
     event_add(user_conn->ev_timeout, &tv);
+    /* set path retry timer */
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    user_conn->ev_path_retry = event_new(ctx->eb, -1, 0, xqc_mini_cli_path_retry_callback, user_conn);
+    event_add(user_conn->ev_path_retry, &tv);
+
 
     
     xqc_mini_cli_user_path_t *path0 = &user_conn->paths[0];
@@ -1812,6 +1844,11 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
         event_free(user_conn->ev_timeout);
         user_conn->ev_timeout = NULL;
     }
+    if (user_conn->ev_path_retry) {
+        event_del(user_conn->ev_path_retry);
+        event_free(user_conn->ev_path_retry);
+        user_conn->ev_path_retry = NULL;
+    }
     free(user_conn);
 }
 
@@ -1827,6 +1864,12 @@ xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
         event_free(user_conn->ev_timeout);
         user_conn->ev_timeout = NULL;
     }
+    if (user_conn->ev_path_retry) {
+        event_del(user_conn->ev_path_retry);
+        event_free(user_conn->ev_path_retry);
+        user_conn->ev_path_retry = NULL;
+    }
+
 
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];

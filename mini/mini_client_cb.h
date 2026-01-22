@@ -71,6 +71,8 @@ void xqc_mini_cli_save_tp_cb(const char * data, size_t data_len, void * user_dat
 // 连接超时回调
 void xqc_mini_cli_timeout_callback(int fd, short what, void *arg);
 
+void xqc_mini_cli_path_retry_callback(int fd, short what, void *arg);
+
 // QUIC 连接创建回调
 int xqc_mini_cli_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data);
 
