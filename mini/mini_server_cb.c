@@ -436,10 +436,39 @@ xqc_mini_svr_open_log_file(void *arg)
     xqc_mini_svr_ctx_t *ctx = (xqc_mini_svr_ctx_t*)arg;
     return open(ctx->args->env_cfg.log_path, (O_WRONLY | O_APPEND | O_CREAT), 0644);
 }
+
+static void
+xqc_mini_svr_write_zlog(xqc_mini_svr_ctx_t *ctx, xqc_log_level_t lvl, const void *buf, size_t size)
+{
+    if (ctx->zlog_cat == NULL) {
+        return;
+    }
+
+    switch (lvl) {
+    case XQC_LOG_DEBUG:
+        //zlog_debug(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    case XQC_LOG_WARN:
+        //zlog_warn(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    case XQC_LOG_ERROR:
+        zlog_error(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    default:
+        //zlog_info(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    }
+}
+
 void
 xqc_mini_svr_write_log_file(xqc_log_level_t lvl, const void *buf, size_t size, void *arg)
 {
     xqc_mini_svr_ctx_t *ctx = (xqc_mini_svr_ctx_t*)arg;
+
+    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+        xqc_mini_svr_write_zlog(ctx, lvl, buf, size);
+        return;
+    }
     if (ctx->log_fd <= 0) {
         return;
     }
@@ -470,6 +499,11 @@ void
 xqc_mini_svr_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *arg)
 {
     xqc_mini_svr_ctx_t *ctx = (xqc_mini_svr_ctx_t*)arg;
+    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+        return;
+    }
+
     if (ctx->log_fd <= 0) {
         return;
     }

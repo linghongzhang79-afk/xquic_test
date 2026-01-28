@@ -35,10 +35,39 @@ xqc_mini_cli_close_log_file(void *arg)
     }
 }
 
+static void
+xqc_mini_cli_write_zlog(xqc_mini_cli_ctx_t *ctx, xqc_log_level_t lvl, const void *buf, size_t size)
+{
+    if (ctx->zlog_cat == NULL) {
+        return;
+    }
+
+    switch (lvl) {
+    case XQC_LOG_DEBUG:
+        //zlog_debug(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    case XQC_LOG_WARN:
+        //zlog_warn(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    case XQC_LOG_ERROR:
+        zlog_error(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    default:
+        //zlog_info(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        break;
+    }
+}
+
+
 void
 xqc_mini_cli_write_log_file(xqc_log_level_t lvl, const void *buf, size_t size, void *engine_user_data)
 {
     xqc_mini_cli_ctx_t *ctx = (xqc_mini_cli_ctx_t*)engine_user_data;
+    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+        xqc_mini_cli_write_zlog(ctx, lvl, buf, size);
+        return;
+    }
+
     if (ctx->log_fd <= 0) {
         return;
     }
@@ -76,6 +105,11 @@ void
 xqc_mini_cli_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *engine_user_data)
 {
     xqc_mini_cli_ctx_t *ctx = (xqc_mini_cli_ctx_t*)engine_user_data;
+    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+        return;
+    }
+
     if (ctx->log_fd <= 0) {
         return;
     }
@@ -356,25 +390,30 @@ ssize_t
 xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     const struct sockaddr *peer_addr, socklen_t peer_addrlen, void *conn_user_data)
 {
-    const int max_write_failures = 3;
+    const int max_write_failures = 1;
     int fd = -1;
     ssize_t res = 0;
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)conn_user_data;
     
     xqc_mini_cli_user_path_t *user_path = NULL;
+    xqc_mini_cli_user_path_t *fallback_path = NULL;
     
     for (int i = 0; i < MAX_PATH_CNT; i++) {
-        if (user_conn->paths[i].is_active
-            && user_conn->paths[i].consecutive_write_failures < max_write_failures
-            && user_conn->paths[i].path_id == path_id)
-        {
+        if (!user_conn->paths[i].is_active
+            || user_conn->paths[i].consecutive_write_failures >= max_write_failures) {
+            continue;
+        }
+        if (fallback_path == NULL) {
+            fallback_path = &user_conn->paths[i];
+        }
+        if (user_conn->paths[i].path_id == path_id) {
             user_path = &user_conn->paths[i];
             break;
         }
     }
 
     if (user_path == NULL) {
-        user_path = &user_conn->paths[0];
+        user_path = fallback_path;
     }
 
     if (user_path == NULL || !user_path->is_active || user_path->fd < 0) {
@@ -412,13 +451,21 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
         user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
     }
     else if (res != XQC_SOCKET_EAGAIN) {
+        printf("[error] xqc_mini_cli_write_socket_ex failed, path_id=%"PRIu64", err=%s\n",
+            user_path->path_id, strerror(get_sys_errno()));
         user_path->consecutive_write_failures++;
         if (user_path->consecutive_write_failures >= max_write_failures
             && user_path->path_id != XQC_MINI_PATH_ID_INVALID)
         {
             printf("[warn] path_id=%"PRIu64" reached write failure threshold, closing path\n",
                 user_path->path_id);
+            user_path->is_active = 0;
+            if (user_conn->active_path_cnt > 0) {
+                user_conn->active_path_cnt--;
+            }
             xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, user_path->path_id);
+            xqc_engine_main_logic(user_conn->ctx->engine);
+            return XQC_SOCKET_EAGAIN;
         }
     }
 
@@ -561,7 +608,7 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
 
     xqc_mini_cli_try_rebuild_paths(user_conn);
 
-    tv.tv_sec = 3;
+    tv.tv_sec = 2;
     tv.tv_usec = 0;
     event_add(user_conn->ev_path_retry, &tv);
 }

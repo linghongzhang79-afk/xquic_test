@@ -1,5 +1,6 @@
 #include "mini_server.h"
 #include <stdint.h>
+#include <strings.h>
 // 去除字符串首尾空白字符
 static char *
 xqc_mini_svr_trim_space(char *text)
@@ -106,6 +107,18 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
             if (endptr != value && *endptr == '\0' && size > 0) {
                 args->net_cfg.user_recv_buf_size = (size_t)size;
             }
+        } else if (strcmp(key, "use_zlog") == 0) {
+            if (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0) {
+                args->env_cfg.use_zlog = 1;
+            } else {
+                args->env_cfg.use_zlog = 0;
+            }
+        } else if (strcmp(key, "zlog_conf") == 0) {
+            memset(args->env_cfg.zlog_conf, 0, sizeof(args->env_cfg.zlog_conf));
+            strncpy(args->env_cfg.zlog_conf, value, sizeof(args->env_cfg.zlog_conf) - 1);
+        } else if (strcmp(key, "zlog_category") == 0) {
+            memset(args->env_cfg.zlog_category, 0, sizeof(args->env_cfg.zlog_category));
+            strncpy(args->env_cfg.zlog_category, value, sizeof(args->env_cfg.zlog_category) - 1);
         }
     }
 
@@ -179,6 +192,10 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
 
     /* init env config */
     strncpy(args->env_cfg.log_path, LOG_PATH, TLS_GROUPS_LEN - 1);
+    args->env_cfg.use_zlog = 1;
+    strncpy(args->env_cfg.zlog_conf, "zlog.conf", sizeof(args->env_cfg.zlog_conf));
+    strncpy(args->env_cfg.zlog_category, "xquic_mini_server", sizeof(args->env_cfg.zlog_category));
+
     strncpy(args->env_cfg.key_out_path, KEY_PATH, PATH_LEN - 1);
     strncpy(args->env_cfg.private_key_file, PRIV_KEY_PATH, PATH_LEN - 1);
     strncpy(args->env_cfg.cert_file, CERT_PEM_PATH, PATH_LEN - 1);
@@ -253,12 +270,28 @@ xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
     //     printf("[error] open log file failed\n");
     //     return XQC_ERROR;
     // }
+    ctx->zlog_cat = NULL;
+    ctx->log_fd = 0;
+    if (ctx->args->env_cfg.use_zlog) {
+        if (zlog_init(ctx->args->env_cfg.zlog_conf) != 0) {
+            printf("[error] zlog_init failed: %s\n", ctx->args->env_cfg.zlog_conf);
+            return XQC_ERROR;
+        }
+        ctx->zlog_cat = zlog_get_category(ctx->args->env_cfg.zlog_category);
+        if (ctx->zlog_cat == NULL) {
+            printf("[error] zlog_get_category failed: %s\n", ctx->args->env_cfg.zlog_category);
+            zlog_fini();
+            return XQC_ERROR;
+        }
+    }
+
     // /* init keylog writer fd */
     // ctx->keylog_fd = xqc_mini_svr_open_keylog_file(ctx);
     // if (ctx->keylog_fd < 0) {
     //     printf("[error] open keylog file failed\n");
     //     return XQC_ERROR;
     // }
+    
     return XQC_OK;
 }
 
@@ -280,9 +313,21 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
         // .keylog_cb = xqc_mini_svr_keylog_cb,
 
         /* disable log/keylog output for the mini server */
-        .log_callbacks = {0},
-        .keylog_cb = NULL,
+        // .log_callbacks = {0},
+        // .keylog_cb = NULL,
+        
+
     };
+    if (args->env_cfg.use_zlog) {
+            callback.log_callbacks.xqc_log_write_err = xqc_mini_svr_write_log_file;
+            callback.log_callbacks.xqc_log_write_stat = xqc_mini_svr_write_log_file;
+            callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
+            callback.keylog_cb = NULL;
+    } else {
+    /* disable log/keylog output for the mini server */
+        callback.log_callbacks = (xqc_log_callbacks_t){0};
+        callback.keylog_cb = NULL;
+    }
 
     static xqc_transport_callbacks_t transport_cbs = {
         .server_accept = xqc_mini_svr_accept,
@@ -671,6 +716,10 @@ xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx)
 {
     xqc_mini_svr_close_keylog_file(ctx);
     xqc_mini_svr_close_log_file(ctx);
+    if (ctx->args && ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+        zlog_fini();
+        ctx->zlog_cat = NULL;
+    }
 
     if (ctx->args) {
         free(ctx->args);

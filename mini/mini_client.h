@@ -11,6 +11,7 @@
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>
+#include <zlog.h>
 
 #ifdef XQC_SYS_WINDOWS
 #pragma comment(lib,"ws2_32.lib")
@@ -122,6 +123,10 @@ typedef struct xqc_mini_cli_quic_config_s {
 typedef struct xqc_mini_cli_env_config_s {
     /* log config */
     char log_path[PATH_LEN];
+    int use_zlog;
+    char zlog_conf[PATH_LEN];
+    char zlog_category[64];
+
 
     /* tls certificates */
     char private_key_file[PATH_LEN];
@@ -184,6 +189,9 @@ typedef struct xqc_mini_cli_ctx_s {
 
     int                 log_fd;
     int                 keylog_fd;
+
+    zlog_category_t    *zlog_cat;
+    
 } xqc_mini_cli_ctx_t;
 
 struct xqc_mini_cli_user_conn_s;
@@ -213,7 +221,6 @@ typedef struct xqc_mini_cli_user_conn_s {
     xqc_mini_cli_ctx_t     *ctx;
 
     xqc_mini_cli_user_path_t paths[MAX_PATH_CNT];
-    int                     total_path_cnt;
     int                     active_path_cnt;
 
     int                     target_requests;

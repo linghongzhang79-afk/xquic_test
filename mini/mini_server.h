@@ -13,6 +13,7 @@
 #include <xquic/xquic_typedef.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <zlog.h>
 
 #include "common.h"
 #include "../demo/xqc_hq.h"
@@ -89,6 +90,10 @@ typedef struct xqc_mini_svr_quic_config_s
 typedef struct xqc_mini_svr_env_config_s {
     /* log config */
     char log_path[PATH_LEN];
+    int use_zlog;
+    char zlog_conf[PATH_LEN];
+    char zlog_category[64];
+
 
     /* tls certificates */
     char private_key_file[PATH_LEN];
@@ -132,6 +137,8 @@ typedef struct xqc_mini_svr_ctx_s {
 
     int                 log_fd;
     int                 keylog_fd;
+
+    zlog_category_t    *zlog_cat;
 } xqc_mini_svr_ctx_t;
 
 
