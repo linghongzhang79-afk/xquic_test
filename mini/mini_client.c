@@ -115,15 +115,15 @@ xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
 {
     static xqc_engine_callback_t callback = {
         .set_event_timer = xqc_mini_cli_set_event_timer,
-        .log_callbacks = {
-            .xqc_log_write_err = xqc_mini_cli_write_log_file,
-            .xqc_log_write_stat = xqc_mini_cli_write_log_file,
-            .xqc_qlog_event_write = xqc_mini_cli_write_qlog_file
-        },
-        .keylog_cb = xqc_mini_cli_keylog_cb,
+        // .log_callbacks = {
+        //     .xqc_log_write_err = xqc_mini_cli_write_log_file,
+        //     .xqc_log_write_stat = xqc_mini_cli_write_log_file,
+        //     .xqc_qlog_event_write = xqc_mini_cli_write_qlog_file
+        // },
+        // .keylog_cb = xqc_mini_cli_keylog_cb,
         /* disable log/keylog output for the mini client */
-        // .log_callbacks = {0},
-        // .keylog_cb = NULL,
+        .log_callbacks = {0},
+        .keylog_cb = NULL,
     };
 
     static xqc_transport_callbacks_t transport_cbs = {
@@ -370,7 +370,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     memset(settings, 0, sizeof(xqc_conn_settings_t));
     settings->cong_ctrl_callback = ccc;
     settings->cc_params.customize_on = 1;
-    settings->cc_params.init_cwnd = 32;
+    settings->cc_params.init_cwnd = 128;
     //settings->so_sndbuf = 1024*1024;
     settings->proto_version = XQC_VERSION_V1;
     settings->spurious_loss_detect_on = 1;
@@ -1687,8 +1687,8 @@ xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn)
     }
 
     int target_cnt = xqc_mini_cli_get_target_path_count(user_conn);
-    printf("[stats] try to rebuild paths, current cnt: %d, target cnt: %d\n",
-        user_conn->active_path_cnt, target_cnt);
+    // printf("[stats] try to rebuild paths, current cnt: %d, target cnt: %d\n",
+    //     user_conn->active_path_cnt, target_cnt);
     while (user_conn->active_path_cnt < target_cnt) {
         if (xqc_mini_cli_create_new_path(user_conn) != XQC_OK) {
             break;

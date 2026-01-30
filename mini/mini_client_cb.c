@@ -264,6 +264,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 ? user_stream->recv_file_path
                 : user_conn->ctx->args->env_cfg.download_path;
             user_stream->recv_body_fp = fopen(download_path, "wb");
+            setvbuf(user_stream->recv_body_fp, NULL, _IOFBF, 4 * 1024 * 1024);
             if (user_stream->recv_body_fp == NULL) {
                 perror("fopen");
                 return XQC_ERROR;
@@ -299,17 +300,22 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
     
         read_sum += read;
+        size_t prev_len = user_stream->recv_body_len;
         user_stream->recv_body_len += read;
+        size_t cur_len = user_stream->recv_body_len;
         
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && user_stream->expected_content_length > 0) {
-            double progress = (double)user_stream->recv_body_len * 100.0
-                / user_stream->expected_content_length;
-            if (progress > 100.0) {
-                progress = 100.0;
-            }
-            printf("\r[download] %.2f%%", progress);
-            fflush(stdout);
+             size_t step = user_stream->expected_content_length / 100; // 1%
+            if (step == 0) step = 1;
+
+            /* 只有跨过新的百分比档位才刷新一次 */
+            if (cur_len / step != prev_len / step) {
+                double progress = (double)cur_len * 100.0 / user_stream->expected_content_length;
+                if (progress > 100.0) progress = 100.0;
+                printf("\r[download] %.0f%%", progress);
+                fflush(stdout);
+             }
         }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET

@@ -319,10 +319,10 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
 
     };
     if (args->env_cfg.use_zlog) {
-            callback.log_callbacks.xqc_log_write_err = xqc_mini_svr_write_log_file;
-            callback.log_callbacks.xqc_log_write_stat = xqc_mini_svr_write_log_file;
-            callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
-            callback.keylog_cb = NULL;
+            // callback.log_callbacks.xqc_log_write_err = xqc_mini_svr_write_log_file;
+            // callback.log_callbacks.xqc_log_write_stat = xqc_mini_svr_write_log_file;
+            // callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
+            // callback.keylog_cb = NULL;
     } else {
     /* disable log/keylog output for the mini server */
         callback.log_callbacks = (xqc_log_callbacks_t){0};
@@ -442,7 +442,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .cong_ctrl_callback = ccc,
         .cc_params = {
             .customize_on = 1,
-            .init_cwnd = 32,
+            .init_cwnd = 128,
             .bbr_enable_lt_bw = 1,
         },
         .spurious_loss_detect_on = 1,

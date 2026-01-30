@@ -15,7 +15,7 @@
 #pragma comment(lib, "Bcrypt.lib")
 #endif
 
-#define XQC_MAX_BUFF_SIZE 4096
+#define XQC_MAX_BUFF_SIZE 4*1024*1024
 // 引擎定时器事件回调，驱动引擎主逻辑
 void xqc_mini_cli_engine_cb(int fd, short what, void *arg);
 // 打开日志文件
