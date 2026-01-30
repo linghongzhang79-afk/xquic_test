@@ -1,8 +1,30 @@
 # Copyright (c) 2022, Alibaba Group Holding Limited
 
-cmake_minimum_required (VERSION 3.5)
-project (xquic)
+cmake_minimum_required (VERSION 3.6)
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
+# set(TOOLCHAIN_DIR /opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux)
+# set(CMAKE_C_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
+# set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
+
+# === SIM8810 SDK ===
+set(SDK_ROOT "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207")
+set(CMAKE_SYSROOT "${SDK_ROOT}/sysroots_pvm")
+
+# toolchain（跟 sdk.mk 一致）
+set(TOOLCHAIN_DIR "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux")
+set(CMAKE_C_COMPILER  ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
+set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
+
+# 让 cmake 查找 include/lib 时走 sysroot
+set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+# ====================
+project (xquic)
 set (xquic_VERSION_MAJOR 0)
 set (xquic_VERSION_MINOR 1)
 set (CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -19,7 +41,6 @@ option (XQC_ENABLE_FEC "enable fec" OFF)
 option (XQC_ENABLE_XOR "enable fec scheme xor" OFF)
 option (XQC_ENABLE_RSC "enable fec scheme reed-solomon code" OFF)
 option (XQC_ENABLE_PKM "enable fec scheme packet mask" OFF)
-option (XQC_PING_ATTACK_PROTECT "enable ping attack protection" OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -63,21 +84,26 @@ endif()
 
 # find ssl module from SSL_DIR if SSL_INC_PATH AND SSL_LIB_PATH not set.
 if(NOT SSL_INC_PATH AND NOT SSL_LIB_PATH)
-    find_package(SSL)
+    # find_package(SSL)
+    # if(NOT SSL_FOUND)
+    #     message(FATAL_ERROR "ssl module not found")
+    # endif(NOT SSL_FOUND)
 
-    if(NOT SSL_FOUND)
-        message(FATAL_ERROR "ssl module not found")
-    endif(NOT SSL_FOUND)
+    set(SSL_INC_PATH "${SSL_PATH}/include")
+    set(SSL_LIB_PATH
+        "${SSL_PATH}/libssl.a"
+        "${SSL_PATH}/libcrypto.a"
+    )
 
     # compat with elder macros
-    if(SSL_DYNAMIC)
-        message(NOTICE "-- Building with dynamic libssl")
-        set(SSL_LIB_PATH ${SSL_LIBRARIES})
-    else()
-        message(NOTICE "-- Building with static libssl")
-        set(SSL_LIB_PATH ${SSL_LIBRARIES_STATIC})
-    endif()
-    set(SSL_INC_PATH ${SSL_INCLUDE_DIR})
+    # if(SSL_DYNAMIC)
+    #     message(NOTICE "-- Building with dynamic libssl")
+    #     set(SSL_LIB_PATH ${SSL_LIBRARIES})
+    # else()
+    #     message(NOTICE "-- Building with static libssl")
+    #     set(SSL_LIB_PATH ${SSL_LIBRARIES_STATIC})
+    # endif()
+    # set(SSL_INC_PATH ${SSL_INCLUDE_DIR})
 
 else()
     if(NOT EXISTS ${SSL_INC_PATH})
@@ -130,10 +156,17 @@ configure_file (
     "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
 )
 
+set(LIBEVENT_ROOT /home/admin123/libevent_aarch64/libevent-2.1.12-stable)
+
+set(LIBEVENT_INCLUDE_DIR ${LIBEVENT_ROOT}/include)
+set(LIBEVENT_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent.a)
+set(LIBEVENT_PTHREADS_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent_pthreads.a)
+
 include_directories(include
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${SSL_INC_PATH}
     ${CMAKE_SOURCE_DIR}
+    ${LIBEVENT_INCLUDE_DIR}
 )
 
 
@@ -172,8 +205,6 @@ endif()
 
 # testing
 if(XQC_ENABLE_TESTING)
-    add_subdirectory(tests)
-    add_subdirectory(demo)
     add_subdirectory(mini)
 endif(XQC_ENABLE_TESTING)
 
@@ -236,6 +267,9 @@ set(
     "src/transport/scheduler/xqc_scheduler_backup.c"
     "src/transport/scheduler/xqc_scheduler_backup_fec.c"
     "src/transport/scheduler/xqc_scheduler_rap.c"
+    "src/transport/scheduler/xqc_scheduler_balanced.c"
+    "src/transport/scheduler/xqc_scheduler_act.c"
+    "src/transport/scheduler/xqc_scheduler_bandwidth.c"
 )
 
 if(XQC_ENABLE_MP_INTEROP)
@@ -404,20 +438,22 @@ add_library(
 
 if(PLATFORM MATCHES "mac")
     target_link_libraries(
-        xquic
+        xquic-static
         "-ldl -Wl,-all_load"
         ${SSL_LIB_PATH}
         "-Wl"
         -lpthread
         -lstdc++
+        m
     )
 else()
     target_link_libraries(
-        xquic
+        xquic-static
         "-ldl -Wl,--whole-archive -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds"
         ${SSL_LIB_PATH}
         "-Wl,--no-whole-archive"
         -lpthread
+        m
     )
 endif()
 
