@@ -108,7 +108,10 @@ typedef struct xqc_mini_svr_env_config_s {
     /* default file when client does not provide path */
     char default_send_file[PATH_LEN];
     /* generated response size for GET downloads; 0 means use file length */
-    
+
+    /* upload output file */
+    char upload_path[PATH_LEN];
+
 
 } xqc_mini_svr_env_config_t;
 

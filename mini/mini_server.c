@@ -80,7 +80,18 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
                 sizeof(args->env_cfg.default_send_file));
             strncpy(args->env_cfg.default_send_file, value,
                 sizeof(args->env_cfg.default_send_file) - 1);
-        } else if (strcmp(key, "kernel_sndbuf") == 0) {
+        } else if (strcmp(key, "mp_sched") == 0) {
+            if (strcmp(value, "minrtt") == 0
+                || strcmp(value, "backup") == 0
+                || strcmp(value, "balanced") == 0
+                || strcmp(value, "rap") == 0
+                || strcmp(value, "act") == 0
+                || strcmp(value, "bw") == 0) {
+                memset(args->quic_cfg.mp_sched, 0, sizeof(args->quic_cfg.mp_sched));
+                strncpy(args->quic_cfg.mp_sched, value, sizeof(args->quic_cfg.mp_sched) - 1);
+            }
+ 
+        }else if (strcmp(key, "kernel_sndbuf") == 0) {
             char *endptr = NULL;
             long size = strtol(value, &endptr, 10);
             if (endptr != value && *endptr == '\0' && size > 0) {
@@ -107,7 +118,10 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
             if (endptr != value && *endptr == '\0' && size > 0) {
                 args->net_cfg.user_recv_buf_size = (size_t)size;
             }
-        } else if (strcmp(key, "use_zlog") == 0) {
+        } else if (strcmp(key, "upload_path") == 0 || strcmp(key, "upload_file") == 0) {
+            memset(args->env_cfg.upload_path, 0, sizeof(args->env_cfg.upload_path));
+            strncpy(args->env_cfg.upload_path, value, sizeof(args->env_cfg.upload_path) - 1);
+        }else if (strcmp(key, "use_zlog") == 0) {
             if (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0) {
                 args->env_cfg.use_zlog = 1;
             } else {
@@ -186,7 +200,7 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     args->quic_cfg.session_ticket_key_len = ret > 0 ? ret : 0;
     args->quic_cfg.cc = CC_TYPE_BBR;
     args->quic_cfg.multipath = 1;
-    strncpy(args->quic_cfg.mp_sched, "act", 32);
+    strncpy(args->quic_cfg.mp_sched, "bw", 32);
     strncpy(args->quic_cfg.ciphers, XQC_TLS_CIPHERS, CIPHER_SUIT_LEN - 1);
     strncpy(args->quic_cfg.groups, XQC_TLS_GROUPS, TLS_GROUPS_LEN - 1);
 
@@ -319,10 +333,10 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
 
     };
     if (args->env_cfg.use_zlog) {
-            // callback.log_callbacks.xqc_log_write_err = xqc_mini_svr_write_log_file;
-            // callback.log_callbacks.xqc_log_write_stat = xqc_mini_svr_write_log_file;
-            // callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
-            // callback.keylog_cb = NULL;
+        callback.log_callbacks.xqc_log_write_err = xqc_mini_svr_write_log_file;
+        callback.log_callbacks.xqc_log_write_stat = xqc_mini_svr_write_log_file;
+        callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
+        callback.keylog_cb = NULL;
     } else {
     /* disable log/keylog output for the mini server */
         callback.log_callbacks = (xqc_log_callbacks_t){0};
@@ -420,11 +434,14 @@ xqc_mini_svr_get_sched_cb(xqc_mini_svr_args_t *args)
     if (strncmp(args->quic_cfg.mp_sched, "minrtt", strlen("minrtt")) == 0) {
         sched = xqc_minrtt_scheduler_cb;
 
-    } if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
+    } else if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
         sched = xqc_backup_scheduler_cb;
     }
-    if(strncmp(args->quic_cfg.mp_sched, "act", strlen("act")) == 0){
+    else if(strncmp(args->quic_cfg.mp_sched, "act", strlen("act")) == 0){
         sched = xqc_act_scheduler_cb;
+    }
+    else if(strncmp(args->quic_cfg.mp_sched, "bw", strlen("bw")) == 0){
+        sched = xqc_bandwidth_scheduler_cb;
     }
     return sched;
 }
@@ -453,7 +470,9 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .adaptive_ack_frequency = 1,
         .anti_amplification_limit = 4,
         .recv_rate_bytes_per_sec = 0,
-        
+        .mp_ack_on_any_path = 1,
+        // .mp_enable_reinjection = 1,
+        .enable_stream_rate_limit = 1,
         .init_recv_window =  512 * 1024 * 1024,  // ✅ 2GB 接收窗口
     };
 

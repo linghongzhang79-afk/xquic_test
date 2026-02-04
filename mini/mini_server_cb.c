@@ -26,11 +26,12 @@ typedef struct {
     struct timeval latest_end;
     unsigned char stream_done[XQC_MINI_SVR_MAX_STREAMS];
     size_t stream_progress[XQC_MINI_SVR_MAX_STREAMS];
+    char output_path[PATH_LEN];
 } xqc_mini_svr_file_state_t;
 
 static xqc_mini_svr_file_state_t g_svr_file_state = {0};
 
-static void xqc_mini_svr_reset_file_state(int stream_count, size_t total_size);
+static void xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *output_path);
 static void xqc_mini_svr_update_upload_progress(xqc_mini_svr_user_stream_t *user_stream);
 static int xqc_mini_svr_prepare_output_file(xqc_mini_svr_user_stream_t *user_stream);//Post文件输出路径
 static void xqc_mini_svr_mark_stream_complete(xqc_mini_svr_user_stream_t *user_stream);//检测流帧是否传输完成
@@ -41,9 +42,14 @@ static void xqc_mini_svr_resolve_file_path(xqc_mini_svr_ctx_t *ctx, const char *
     char *resolved, size_t resolved_len);
 static void xqc_mini_svr_prepare_text_response(xqc_mini_svr_user_stream_t *user_stream,
     int status, const char *fmt, ...);
+static void xqc_mini_svr_compute_stream_segment(int stream_count, int stream_index,
+    size_t total_size, size_t *offset, size_t *length);
 static int xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream);
 static void xqc_mini_svr_fill_generated_chunk(unsigned char *buf, size_t len,
     size_t offset);
+static void xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
+    size_t resolved_len);
+
 static void
 xqc_mini_svr_log_response_send_stats(xqc_mini_svr_user_stream_t *user_stream)
 {
@@ -212,26 +218,61 @@ xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream)
         resp_len = (size_t)file_length;
     }
 
-    user_stream->send_body_fp = NULL;
+    user_stream->send_body_fp = fopen(user_stream->resolved_path, "rb");
+    if (user_stream->send_body_fp == NULL) {
+        xqc_mini_svr_prepare_text_response(user_stream, 404,
+            "file %s not found", user_stream->resolved_path);
+        return XQC_OK;
+    }
     user_stream->response_body_len = resp_len;
     user_stream->response_body_sent = 0;
+    if (!user_stream->metadata_parsed) {
+        user_stream->response_body_offset = 0;
+    }
     user_stream->buffered_len = 0;
     user_stream->buffered_sent = 0;
-    //user_stream->use_file_response = 1;
-    user_stream->use_generated_response = 1;
+    user_stream->use_file_response = 1;
+    user_stream->use_generated_response = 0;
     user_stream->use_file_response = 0;
     user_stream->response_status = 200;
     user_stream->response_content_type = "application/octet-stream";
     user_stream->response_prepared = 1;
 
-    printf("[server] serving generated data for %s (%zu bytes)\n",
+    // printf("[server] serving generated data for %s (%zu bytes, offset=%zu)\n",
+    //     user_stream->resolved_path, user_stream->response_body_len,
+    //     user_stream->response_body_offset);
+    printf("[server] serving file data for %s (%zu bytes)\n",
         user_stream->resolved_path, user_stream->response_body_len);
+
 
     return XQC_OK;
 }
+static void
+xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
+    size_t resolved_len)
+{
+    if (resolved_len == 0) {
+        return;
+    }
+    resolved[0] = '\0';
+    if (ctx == NULL || ctx->args == NULL) {
+        return;
+    }
+
+    const char *target = ctx->args->env_cfg.upload_path;
+    if (target == NULL || target[0] == '\0') {
+        target = SERVER_OUTPUT_FILE;
+    }
+    if (target[0] == '/') {
+        strncpy(resolved, target, resolved_len - 1);
+        resolved[resolved_len - 1] = '\0';
+        return;
+    }
+    snprintf(resolved, resolved_len, "%s/%s", ctx->args->env_cfg.data_dir, target);
+}
 
 static void
-xqc_mini_svr_reset_file_state(int stream_count, size_t total_size)
+xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *output_path)
 {
     if (stream_count <= 0) {
         stream_count = 1;
@@ -254,15 +295,26 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size)
     g_svr_file_state.latest_end.tv_usec = 0;
     memset(g_svr_file_state.stream_done, 0, sizeof(g_svr_file_state.stream_done));
     memset(g_svr_file_state.stream_progress, 0, sizeof(g_svr_file_state.stream_progress));
-
-    if (remove(SERVER_OUTPUT_FILE) == 0) {
-        printf("[server] removed previous output file %s\n", SERVER_OUTPUT_FILE);
+    if (output_path != NULL && output_path[0] != '\0') {
+        strncpy(g_svr_file_state.output_path, output_path,
+            sizeof(g_svr_file_state.output_path) - 1);
+        g_svr_file_state.output_path[sizeof(g_svr_file_state.output_path) - 1] = '\0';
+    } else {
+        g_svr_file_state.output_path[0] = '\0';
+    }
+    const char *output_file = g_svr_file_state.output_path[0] != '\0'
+        ? g_svr_file_state.output_path
+        : SERVER_OUTPUT_FILE;
+    if (remove(output_file) == 0) {
+        printf("[server] removed previous output file %s\n", output_file);
     }
 
-    FILE *fp = fopen(SERVER_OUTPUT_FILE, "wb");
+
+
+    FILE *fp = fopen(output_file, "wb");
     if (fp == NULL) {
         perror("fopen");
-        printf("[error] failed to prepare output file '%s'\n", SERVER_OUTPUT_FILE);
+        printf("[error] failed to prepare output file '%s'\n", output_file);
         return;
     }
     if (total_size > 0) {
@@ -275,29 +327,94 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size)
     fclose(fp);
 
     printf("[server] prepared output file '%s' for %d streams totaling %zu bytes\n",
-        SERVER_OUTPUT_FILE, stream_count, total_size);
+        output_file, stream_count, total_size);
 }
+static void
+xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
+    size_t resolved_len)
+{
+    if (resolved_len == 0) {
+        return;
+    }
+    resolved[0] = '\0';
+    if (ctx == NULL || ctx->args == NULL) {
+        return;
+    }
+
+    const char *target = ctx->args->env_cfg.upload_path;
+    if (target == NULL || target[0] == '\0') {
+        target = SERVER_OUTPUT_FILE;
+    }
+    if (target[0] == '/') {
+        strncpy(resolved, target, resolved_len - 1);
+        resolved[resolved_len - 1] = '\0';
+        return;
+    }
+    snprintf(resolved, resolved_len, "%s/%s", ctx->args->env_cfg.data_dir, target);
+}
+
+
+static void
+xqc_mini_svr_compute_stream_segment(int stream_count, int stream_index,
+    size_t total_size, size_t *offset, size_t *length)
+{
+    if (offset == NULL || length == NULL) {
+        return;
+    }
+    if (stream_count <= 0) {
+        *offset = 0;
+        *length = total_size;
+        return;
+    }
+    if (stream_index < 0) {
+        stream_index = 0;
+    }
+    if (stream_index >= stream_count) {
+        stream_index = stream_count - 1;
+    }
+    size_t base = total_size / (size_t)stream_count;
+    size_t remainder = total_size % (size_t)stream_count;
+    size_t start = base * (size_t)stream_index;
+    if ((size_t)stream_index < remainder) {
+        start += (size_t)stream_index;
+    } else {
+        start += remainder;
+    }
+    size_t len = base + ((size_t)stream_index < remainder ? 1 : 0);
+    *offset = start;
+    *length = len;
+}
+
 
 static int
 xqc_mini_svr_prepare_output_file(xqc_mini_svr_user_stream_t *user_stream)
 {
+    xqc_mini_svr_user_conn_t *user_conn = xqc_mini_svr_get_conn_from_request(user_stream);
+    xqc_mini_svr_ctx_t *ctx = user_conn ? user_conn->ctx : NULL;
+    char output_path[PATH_LEN];
+    xqc_mini_svr_resolve_upload_path(ctx, output_path, sizeof(output_path));
+    const char *output_file = output_path[0] != '\0' ? output_path : SERVER_OUTPUT_FILE;
+
     if (!g_svr_file_state.initialized
         || g_svr_file_state.expected_streams != user_stream->stream_count
-        || g_svr_file_state.total_size != user_stream->total_file_size) {
+        || g_svr_file_state.total_size != user_stream->total_file_size
+        || strncmp(g_svr_file_state.output_path, output_file,
+            sizeof(g_svr_file_state.output_path)) != 0) {
+
         xqc_mini_svr_reset_file_state(user_stream->stream_count,
-            user_stream->total_file_size);
+            user_stream->total_file_size,output_file);
     }
 
     user_stream->file_generation = g_svr_file_state.generation;
 
     if (user_stream->recv_body_fp == NULL) {
-        user_stream->recv_body_fp = fopen(SERVER_OUTPUT_FILE, "r+b");
+        user_stream->recv_body_fp = fopen(output_file, "r+b");
         if (user_stream->recv_body_fp == NULL) {
-            user_stream->recv_body_fp = fopen(SERVER_OUTPUT_FILE, "w+b");
+            user_stream->recv_body_fp = fopen(output_file, "w+b");
         }
         if (user_stream->recv_body_fp == NULL) {
             perror("fopen");
-            printf("[error] failed to open output file '%s'\n", SERVER_OUTPUT_FILE);
+            printf("[error] failed to open output file '%s'\n", output_file);
             return XQC_ERROR;
         }
     }
@@ -446,16 +563,16 @@ xqc_mini_svr_write_zlog(xqc_mini_svr_ctx_t *ctx, xqc_log_level_t lvl, const void
 
     switch (lvl) {
     case XQC_LOG_DEBUG:
-        //zlog_debug(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        zlog_debug(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     case XQC_LOG_WARN:
-        //zlog_warn(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        zlog_warn(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     case XQC_LOG_ERROR:
         zlog_error(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     default:
-        //zlog_info(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        zlog_info(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     }
 }
@@ -664,6 +781,7 @@ xqc_mini_svr_h3_request_create_notify(xqc_h3_request_t *h3_request, void *strm_u
     user_stream->static_response[0] = '\0';
     user_stream->request_path[0] = '\0';
     user_stream->resolved_path[0] = '\0';
+    user_stream->response_body_offset = 0;
 
     xqc_h3_request_set_user_data(h3_request, user_stream);
     user_stream->recv_buf = calloc(1, REQ_BUF_SIZE);
@@ -882,7 +1000,27 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
 
         if (user_stream->method == REQUEST_METHOD_GET) {
             if (have_total) {
-                user_stream->requested_generated_length = (size_t)parsed_total;
+                user_stream->total_file_size = (size_t)parsed_total;
+                if (have_index && have_count) {
+                    size_t stream_offset = 0;
+                    size_t stream_length = 0;
+                    xqc_mini_svr_compute_stream_segment((int)parsed_count,
+                        (int)parsed_index, user_stream->total_file_size,
+                        &stream_offset, &stream_length);
+                    if (have_offset && parsed_offset != stream_offset) {
+                        printf("[warn] stream offset mismatch, header=%llu computed=%zu\n",
+                            parsed_offset, stream_offset);
+                    }
+                    user_stream->stream_index = (int)parsed_index;
+                    user_stream->stream_count = (int)parsed_count;
+                    user_stream->stream_offset = stream_offset;
+                    user_stream->metadata_parsed = 1;
+                    user_stream->requested_generated_length = stream_length;
+                    user_stream->response_body_offset = stream_offset;
+                } else {
+                    user_stream->requested_generated_length = user_stream->total_file_size;
+                    user_stream->response_body_offset = 0;
+                }
             }
             if (!user_stream->response_prepared) {
                 int prep_ret = xqc_mini_svr_prepare_file_response(user_stream);
@@ -1043,7 +1181,7 @@ xqc_mini_svr_send_body(xqc_mini_svr_user_stream_t *user_stream)
                     break;
                 }
                 xqc_mini_svr_fill_generated_chunk(user_stream->send_cache, chunk,
-                    user_stream->response_body_sent);
+                    user_stream->response_body_offset + user_stream->response_body_sent);
                 user_stream->buffered_len = chunk;
                 user_stream->buffered_sent = 0;
             }

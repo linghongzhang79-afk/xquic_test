@@ -140,6 +140,13 @@ typedef struct xqc_mini_cli_env_config_s {
 
     /* download target */
     char download_path[PATH_LEN];
+
+     /* download request path */
+    char download_target[PATH_LEN];
+
+    /* upload source */
+    char upload_path[PATH_LEN];
+
 } xqc_mini_cli_env_config_t;
 
 
@@ -227,6 +234,7 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     completed_requests;
     size_t                  send_file_size;
     char                    send_file_path[PATH_LEN];
+    int                     recv_body_fd;
 
     xqc_msec_t              upload_start_time;
     int                     upload_finished_streams;
@@ -250,8 +258,7 @@ typedef struct xqc_mini_cli_user_stream_s {
     size_t                 buffered_len;
     size_t                 buffered_sent;
     size_t                 chunk_offset;
-    /* save file */
-    FILE                        *recv_body_fp;
+    
 
     /* stat for IO */
     size_t                      send_body_len;

@@ -6,6 +6,10 @@
  */
 #include "mini_client_cb.h"
 #include <strings.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 /**
  * @brief engine callbacks to trigger engine main logic 
  */
@@ -44,16 +48,16 @@ xqc_mini_cli_write_zlog(xqc_mini_cli_ctx_t *ctx, xqc_log_level_t lvl, const void
 
     switch (lvl) {
     case XQC_LOG_DEBUG:
-        //zlog_debug(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        zlog_debug(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     case XQC_LOG_WARN:
-        //zlog_warn(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        zlog_warn(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     case XQC_LOG_ERROR:
         zlog_error(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     default:
-        //zlog_info(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
+        zlog_info(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     }
 }
@@ -189,9 +193,10 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
         fclose(user_stream->send_body_fp);
         user_stream->send_body_fp = NULL;
     }
-    if (user_stream->recv_body_fp) {
-        fclose(user_stream->recv_body_fp);
-        user_stream->recv_body_fp = NULL;
+    if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && user_conn->recv_body_fd >= 0) {
+            close(user_conn->recv_body_fd);
+            user_conn->recv_body_fd = -1;
     }
     free(user_stream->send_buffer);
     user_stream->send_buffer = NULL;
@@ -259,14 +264,13 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && status_code >= 200 && status_code < 300
-            && user_stream->recv_body_fp == NULL) {
+            && user_conn->recv_body_fd < 0) {
             const char *download_path = user_stream->recv_file_path[0]
                 ? user_stream->recv_file_path
                 : user_conn->ctx->args->env_cfg.download_path;
-            user_stream->recv_body_fp = fopen(download_path, "wb");
-            setvbuf(user_stream->recv_body_fp, NULL, _IOFBF, 4 * 1024 * 1024);
-            if (user_stream->recv_body_fp == NULL) {
-                perror("fopen");
+            user_conn->recv_body_fd = open(download_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+            if (user_conn->recv_body_fd < 0) {
+                perror("open");
                 return XQC_ERROR;
             }
             printf("[stats] response body will be stored in %s\n", download_path);
@@ -276,6 +280,8 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             /* only header in request */
             user_stream->recv_fin = 1;
             printf("[stats] h3 request read header finish \n");
+            xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
+            xqc_engine_main_logic(user_conn->ctx->engine);
             return XQC_OK;
         }
         
@@ -319,11 +325,10 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_stream->recv_body_fp != NULL && read > 0) {
-            size_t written = fwrite(recv_buff, 1, (size_t)read,
-                user_stream->recv_body_fp);
+            &&  user_conn->recv_body_fd >= 0 && read > 0) {
+            size_t written = write(user_conn->recv_body_fd, recv_buff, (size_t)read);
             if (written != (size_t)read) {
-                perror("fwrite");
+                perror("pwrite");
                 return XQC_ERROR;
             }
         }
@@ -355,6 +360,9 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         printf("[stats] recv finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
             user_stream->recv_body_len, duration_ms, mbps);
         printf("[stats] read h3 request finish. \n");
+        user_stream->recv_fin = 1;
+        xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
+        xqc_engine_main_logic(user_conn->ctx->engine);
     }
 
     return XQC_OK;

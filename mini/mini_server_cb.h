@@ -18,7 +18,7 @@
 #include "mini_server.h"
 #include <inttypes.h>
 
-#define REQ_BUF_SIZE 2048
+#define REQ_BUF_SIZE 4*1024*1024
 
 typedef struct xqc_mini_svr_user_stream_s {
     xqc_h3_request_t           *h3_request;
@@ -52,6 +52,7 @@ typedef struct xqc_mini_svr_user_stream_s {
 
     size_t                      response_body_len;
     size_t                      response_body_sent;
+    size_t                      response_body_offset;
     size_t                      buffered_len;
     size_t                      buffered_sent;
     unsigned char               send_cache[REQ_BUF_SIZE];
