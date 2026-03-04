@@ -233,7 +233,6 @@ xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream)
     user_stream->buffered_sent = 0;
     user_stream->use_file_response = 1;
     user_stream->use_generated_response = 0;
-    user_stream->use_file_response = 0;
     user_stream->response_status = 200;
     user_stream->response_content_type = "application/octet-stream";
     user_stream->response_prepared = 1;
@@ -246,29 +245,6 @@ xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream)
 
 
     return XQC_OK;
-}
-static void
-xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
-    size_t resolved_len)
-{
-    if (resolved_len == 0) {
-        return;
-    }
-    resolved[0] = '\0';
-    if (ctx == NULL || ctx->args == NULL) {
-        return;
-    }
-
-    const char *target = ctx->args->env_cfg.upload_path;
-    if (target == NULL || target[0] == '\0') {
-        target = SERVER_OUTPUT_FILE;
-    }
-    if (target[0] == '/') {
-        strncpy(resolved, target, resolved_len - 1);
-        resolved[resolved_len - 1] = '\0';
-        return;
-    }
-    snprintf(resolved, resolved_len, "%s/%s", ctx->args->env_cfg.data_dir, target);
 }
 
 static void
@@ -408,10 +384,7 @@ xqc_mini_svr_prepare_output_file(xqc_mini_svr_user_stream_t *user_stream)
     user_stream->file_generation = g_svr_file_state.generation;
 
     if (user_stream->recv_body_fp == NULL) {
-        user_stream->recv_body_fp = fopen(output_file, "r+b");
-        if (user_stream->recv_body_fp == NULL) {
-            user_stream->recv_body_fp = fopen(output_file, "w+b");
-        }
+        user_stream->recv_body_fp = fopen(output_file, "wb+");
         if (user_stream->recv_body_fp == NULL) {
             perror("fopen");
             printf("[error] failed to open output file '%s'\n", output_file);
@@ -616,10 +589,10 @@ void
 xqc_mini_svr_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *arg)
 {
     xqc_mini_svr_ctx_t *ctx = (xqc_mini_svr_ctx_t*)arg;
-    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
-        return;
-    }
+    // if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+    //     zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+    //     return;
+    // }
 
     if (ctx->log_fd <= 0) {
         return;

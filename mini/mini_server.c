@@ -298,6 +298,14 @@ xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
             return XQC_ERROR;
         }
     }
+    if (!ctx->args->env_cfg.use_zlog || ctx->zlog_cat == NULL) {
+        // /* init log writer fd */
+        ctx->log_fd = xqc_mini_svr_open_log_file(ctx);
+        if (ctx->log_fd < 0) {
+            printf("[error] open log file failed\n");
+            return XQC_ERROR;
+        }
+    }
 
     // /* init keylog writer fd */
     // ctx->keylog_fd = xqc_mini_svr_open_keylog_file(ctx);
@@ -333,13 +341,14 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
 
     };
     if (args->env_cfg.use_zlog) {
-        callback.log_callbacks.xqc_log_write_err = xqc_mini_svr_write_log_file;
-        callback.log_callbacks.xqc_log_write_stat = xqc_mini_svr_write_log_file;
+        // callback.log_callbacks.xqc_log_write_err = xqc_mini_svr_write_log_file;
+        // callback.log_callbacks.xqc_log_write_stat = xqc_mini_svr_write_log_file;
         callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
         callback.keylog_cb = NULL;
     } else {
     /* disable log/keylog output for the mini server */
         callback.log_callbacks = (xqc_log_callbacks_t){0};
+        // callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
         callback.keylog_cb = NULL;
     }
 
@@ -472,8 +481,8 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .recv_rate_bytes_per_sec = 0,
         .mp_ack_on_any_path = 1,
         // .mp_enable_reinjection = 1,
-        .enable_stream_rate_limit = 1,
-        .init_recv_window =  512 * 1024 * 1024,  // ✅ 2GB 接收窗口
+        // .enable_stream_rate_limit = 1,
+        .init_recv_window =  64 * 1024 * 1024,  // ✅ 2GB 接收窗口
     };
 
     /* set customized connection settings to engine ctx */

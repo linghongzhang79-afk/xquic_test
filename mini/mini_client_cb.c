@@ -6,9 +6,6 @@
  */
 #include "mini_client_cb.h"
 #include <strings.h>
-#include <sys/types.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 /**
  * @brief engine callbacks to trigger engine main logic 
@@ -109,10 +106,10 @@ void
 xqc_mini_cli_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *engine_user_data)
 {
     xqc_mini_cli_ctx_t *ctx = (xqc_mini_cli_ctx_t*)engine_user_data;
-    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
-        return;
-    }
+    // if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+    //     zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+    //     return;
+    // }
 
     if (ctx->log_fd <= 0) {
         return;
@@ -193,10 +190,9 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
         fclose(user_stream->send_body_fp);
         user_stream->send_body_fp = NULL;
     }
-    if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_conn->recv_body_fd >= 0) {
-            close(user_conn->recv_body_fd);
-            user_conn->recv_body_fd = -1;
+    if (user_stream->recv_body_fp) {
+        fclose(user_stream->recv_body_fp);
+        user_stream->recv_body_fp = NULL;
     }
     free(user_stream->send_buffer);
     user_stream->send_buffer = NULL;
@@ -236,7 +232,10 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
         int status_code = 0;
         for (int i = 0; i < headers->count; i++) {
-            printf("[receive report] %s = %s\n", (char *)headers->headers[i].name.iov_base,
+            printf("[receive report] %.*s = %.*s\n",
+                (int)headers->headers[i].name.iov_len,
+                (char *)headers->headers[i].name.iov_base,
+                (int)headers->headers[i].value.iov_len,
                 (char *)headers->headers[i].value.iov_base);
             if (headers->headers[i].name.iov_len == strlen(":status")
                 && strncmp((char *)headers->headers[i].name.iov_base, ":status",
@@ -264,13 +263,16 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && status_code >= 200 && status_code < 300
-            && user_conn->recv_body_fd < 0) {
+            && user_stream->recv_body_fp == NULL) {
             const char *download_path = user_stream->recv_file_path[0]
                 ? user_stream->recv_file_path
                 : user_conn->ctx->args->env_cfg.download_path;
-            user_conn->recv_body_fd = open(download_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-            if (user_conn->recv_body_fd < 0) {
-                perror("open");
+            printf("[stats] response status: %d, download_path: %s\n",
+                status_code, download_path);
+            user_stream->recv_body_fp = fopen(download_path, "wb");
+            setvbuf(user_stream->recv_body_fp, NULL, _IOFBF, 4 * 1024 * 1024);
+            if (user_stream->recv_body_fp == NULL) {
+                perror("fopen");
                 return XQC_ERROR;
             }
             printf("[stats] response body will be stored in %s\n", download_path);
@@ -280,8 +282,10 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             /* only header in request */
             user_stream->recv_fin = 1;
             printf("[stats] h3 request read header finish \n");
-            xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
-            xqc_engine_main_logic(user_conn->ctx->engine);
+            if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET){
+                xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
+                xqc_engine_main_logic(user_conn->ctx->engine);
+            }
             return XQC_OK;
         }
         
@@ -325,10 +329,11 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            &&  user_conn->recv_body_fd >= 0 && read > 0) {
-            size_t written = write(user_conn->recv_body_fd, recv_buff, (size_t)read);
+            && user_stream->recv_body_fp != NULL && read > 0) {
+            size_t written = fwrite(recv_buff, 1, (size_t)read,
+                user_stream->recv_body_fp);
             if (written != (size_t)read) {
-                perror("pwrite");
+                perror("fwrite");
                 return XQC_ERROR;
             }
         }
@@ -337,6 +342,17 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
     //printf("[report] xqc_h3_request_recv_body size %zd, fin:%d\n", read, fin);
 
     if (fin) {
+        xqc_usec_t end_time = xqc_now();
+        double duration_ms = (user_stream->start_time > 0)
+            ? (end_time - user_stream->start_time) / 1000.0
+            : 0.0;
+        double mbps = duration_ms > 0
+            ? (user_stream->recv_body_len * 8.0) / (duration_ms * 1000.0)
+            : 0.0;
+        printf("[stats] recv finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
+            user_stream->recv_body_len, duration_ms, mbps);
+        printf("[stats] read h3 request finish. \n");
+        user_stream->recv_fin = 1;
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && user_stream->expected_content_length > 0) {
             printf("\n");
@@ -349,20 +365,11 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 : user_conn->ctx->args->env_cfg.download_path;
             printf("[stats] download complete, %zu bytes saved to %s\n",
                 user_stream->recv_body_len, download_path);
+            xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
+            xqc_engine_main_logic(user_conn->ctx->engine);
         }
-        xqc_usec_t end_time = xqc_now();
-        double duration_ms = (user_stream->start_time > 0)
-            ? (end_time - user_stream->start_time) / 1000.0
-            : 0.0;
-        double mbps = duration_ms > 0
-            ? (user_stream->recv_body_len * 8.0) / (duration_ms * 1000.0)
-            : 0.0;
-        printf("[stats] recv finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
-            user_stream->recv_body_len, duration_ms, mbps);
-        printf("[stats] read h3 request finish. \n");
-        user_stream->recv_fin = 1;
-        xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
-        xqc_engine_main_logic(user_conn->ctx->engine);
+        
+        
     }
 
     return XQC_OK;

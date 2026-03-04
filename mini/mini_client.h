@@ -234,7 +234,7 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     completed_requests;
     size_t                  send_file_size;
     char                    send_file_path[PATH_LEN];
-    int                     recv_body_fd;
+    
 
     xqc_msec_t              upload_start_time;
     int                     upload_finished_streams;
@@ -252,6 +252,7 @@ typedef struct xqc_mini_cli_user_stream_s {
 
     /* send file*/
     FILE                  *send_body_fp;
+    FILE                   *recv_body_fp;
     unsigned char          *send_buffer;
     size_t                 total_sent;
     size_t                 file_size;
