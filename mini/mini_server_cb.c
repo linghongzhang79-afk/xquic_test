@@ -49,6 +49,9 @@ static void xqc_mini_svr_fill_generated_chunk(unsigned char *buf, size_t len,
     size_t offset);
 static void xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
     size_t resolved_len);
+static int xqc_mini_svr_get_target_file_size(xqc_mini_svr_user_stream_t *user_stream,
+    size_t *file_size);
+
 
 static void
 xqc_mini_svr_log_response_send_stats(xqc_mini_svr_user_stream_t *user_stream)
@@ -224,6 +227,18 @@ xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream)
             "file %s not found", user_stream->resolved_path);
         return XQC_OK;
     }
+    if (user_stream->response_body_offset > 0) {
+        if (fseek(user_stream->send_body_fp,
+                (long)user_stream->response_body_offset, SEEK_SET) != 0) {
+            perror("fseek");
+            fclose(user_stream->send_body_fp);
+            user_stream->send_body_fp = NULL;
+            xqc_mini_svr_prepare_text_response(user_stream, 500,
+                "failed to seek file %s", user_stream->resolved_path);
+            return XQC_OK;
+        }
+    }
+
     user_stream->response_body_len = resp_len;
     user_stream->response_body_sent = 0;
     if (!user_stream->metadata_parsed) {
@@ -246,6 +261,41 @@ xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream)
 
     return XQC_OK;
 }
+static int
+xqc_mini_svr_get_target_file_size(xqc_mini_svr_user_stream_t *user_stream,
+    size_t *file_size)
+{
+    if (user_stream == NULL || file_size == NULL) {
+        return XQC_ERROR;
+    }
+
+    xqc_mini_svr_user_conn_t *user_conn = xqc_mini_svr_get_conn_from_request(user_stream);
+    if (user_conn == NULL || user_conn->ctx == NULL) {
+        return XQC_ERROR;
+    }
+
+    xqc_mini_svr_resolve_file_path(user_conn->ctx, user_stream->request_path,
+        user_stream->resolved_path, sizeof(user_stream->resolved_path));
+
+    FILE *fp = fopen(user_stream->resolved_path, "rb");
+    if (fp == NULL) {
+        return XQC_ERROR;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return XQC_ERROR;
+    }
+    long file_length = ftell(fp);
+    fclose(fp);
+    if (file_length < 0) {
+        return XQC_ERROR;
+    }
+
+    *file_size = (size_t)file_length;
+    return XQC_OK;
+}
+
+
 
 static void
 xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *output_path)
@@ -589,10 +639,10 @@ void
 xqc_mini_svr_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *arg)
 {
     xqc_mini_svr_ctx_t *ctx = (xqc_mini_svr_ctx_t*)arg;
-    // if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-    //     zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
-    //     return;
-    // }
+    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+        return;
+    }
 
     if (ctx->log_fd <= 0) {
         return;
@@ -807,6 +857,7 @@ xqc_mini_svr_send_response(xqc_mini_svr_user_stream_t *user_stream)
     }
 
     /* response header buf list */
+    char response_total_length[32] = {0};
     xqc_http_header_t rsp_hdr[] = {
         {
             .name = {.iov_base = ":status", .iov_len = 7},
@@ -825,12 +876,25 @@ xqc_mini_svr_send_response(xqc_mini_svr_user_stream_t *user_stream)
             .value = {.iov_base = user_stream->response_content_length,
                 .iov_len = strlen(user_stream->response_content_length)},
             .flags = 0,
-        }
+        },
+        {
+            .name = {.iov_base = "x-total-length", .iov_len = 14},
+            .value = {.iov_base = response_total_length, .iov_len = 0},
+            .flags = 0,
+        },
     };
+    size_t rsp_hdr_cnt = 3;
+    if (user_stream->total_file_size > 0) {
+        snprintf(response_total_length, sizeof(response_total_length), "%zu",
+            user_stream->total_file_size);
+        rsp_hdr[3].value.iov_len = strlen(response_total_length);
+        rsp_hdr_cnt = 4;
+    }
+
     /* response header */
     xqc_http_headers_t rsp_hdrs;
     rsp_hdrs.headers = rsp_hdr;
-    rsp_hdrs.count = sizeof(rsp_hdr) / sizeof(rsp_hdr[0]);
+    rsp_hdrs.count =  rsp_hdr_cnt;
 
     if (user_stream->header_sent == 0) {
         ssize_t ret = xqc_h3_request_send_headers(user_stream->h3_request,
@@ -972,14 +1036,32 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
         printf("=============================================================\n");
 
         if (user_stream->method == REQUEST_METHOD_GET) {
-            if (have_total) {
-                user_stream->total_file_size = (size_t)parsed_total;
+            size_t real_file_size = 0;
+            if (xqc_mini_svr_get_target_file_size(user_stream, &real_file_size) != XQC_OK) {
+                xqc_mini_svr_prepare_text_response(user_stream, 404,
+                    "file %s not found", user_stream->request_path);
+            } else {
+                user_stream->total_file_size = real_file_size;
                 if (have_index && have_count) {
+                    if (parsed_count <= 0) {
+                        printf("[error] invalid stream count %ld\n", parsed_count);
+                        return XQC_ERROR;
+                    }
+                    if (parsed_index < 0 || parsed_index >= parsed_count) {
+                        printf("[error] invalid stream index %ld for count %ld\n",
+                            parsed_index, parsed_count);
+                        return XQC_ERROR;
+                    }
+
                     size_t stream_offset = 0;
                     size_t stream_length = 0;
                     xqc_mini_svr_compute_stream_segment((int)parsed_count,
                         (int)parsed_index, user_stream->total_file_size,
                         &stream_offset, &stream_length);
+                    if (have_total && parsed_total != user_stream->total_file_size) {
+                        printf("[warn] total length mismatch, header=%llu file=%zu\n",
+                            parsed_total, user_stream->total_file_size);
+                    }
                     if (have_offset && parsed_offset != stream_offset) {
                         printf("[warn] stream offset mismatch, header=%llu computed=%zu\n",
                             parsed_offset, stream_offset);

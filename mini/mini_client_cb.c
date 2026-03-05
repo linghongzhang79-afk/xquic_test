@@ -106,10 +106,10 @@ void
 xqc_mini_cli_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *engine_user_data)
 {
     xqc_mini_cli_ctx_t *ctx = (xqc_mini_cli_ctx_t*)engine_user_data;
-    // if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-    //     zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
-    //     return;
-    // }
+    if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
+        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+        return;
+    }
 
     if (ctx->log_fd <= 0) {
         return;
@@ -170,11 +170,61 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
 void
 xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 {
+    (void)h3_conn;
+    xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
+    if (user_conn == NULL) {
+        return;
+    }
+
+    xqc_mini_cli_try_rebuild_paths(user_conn);
+    user_conn->handshake_finished = 1;
+    user_conn->path_wait_rounds_after_handshake = 0;
+    printf("[stats] active paths after handshake: %d\n", user_conn->active_path_cnt);
+    int target_paths = user_conn->ctx->args->net_cfg.multi_interface_cnt;
+    if (target_paths <= 0) {
+        target_paths = MAX_PATH_CNT;
+    }
+    if (target_paths > MAX_PATH_CNT) {
+        target_paths = MAX_PATH_CNT;
+    }
+    if (user_conn->active_path_cnt < target_paths) {
+        printf("[stats] waiting for additional path ids from peer, path retry timer continues\n");
+        return;
+    }
+
+    if (xqc_mini_cli_launch_requests(user_conn) != XQC_OK) {
+        printf("[error] launch requests after handshake failed\n");
+    }
+
     return;
 }
 int
 xqc_mini_cli_h3_request_create_notify(xqc_h3_request_t *h3_request, void *h3s_user_data)
 {
+    // xqc_mini_cli_user_stream_t *user_stream = (xqc_mini_cli_user_stream_t *)h3s_user_data;
+    // if (user_stream == NULL || user_stream->user_conn == NULL || user_stream->user_conn->ctx == NULL) {
+    //     return 0;
+    // }
+
+    // xqc_mini_cli_user_conn_t *user_conn = user_stream->user_conn;
+    // xqc_mini_cli_args_t *args = user_conn->ctx->args;
+
+    // if (args->req_cfg.method == REQUEST_METHOD_GET
+    //     && args->quic_cfg.multipath
+    //     && user_conn->target_requests == 1)
+    // {
+    //     xqc_h3_priority_t prio;
+    //     xqc_h3_priority_init(&prio);
+    //     prio.schedule = 1;
+    //     prio.reinject = 1;
+    //     if (xqc_h3_request_set_priority(h3_request, &prio) != XQC_OK) {
+    //         printf("[warn] stream %d set multipath priority failed\n", user_stream->stream_index);
+
+    //     } else {
+    //         printf("[stats] stream %d enable per-stream multipath schedule/reinject\n",
+    //             user_stream->stream_index);
+    //     }
+    // }
     return 0;
 }
 
@@ -256,6 +306,15 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 }
                 memcpy(length_buf, headers->headers[i].value.iov_base, len);
                 user_stream->expected_content_length = strtoull(length_buf, NULL, 10);
+            }else if (strncasecmp((char *)headers->headers[i].name.iov_base,
+                "x-total-length", headers->headers[i].name.iov_len) == 0) {
+                char total_buf[32] = {0};
+                size_t len = headers->headers[i].value.iov_len;
+                if (len >= sizeof(total_buf)) {
+                    len = sizeof(total_buf) - 1;
+                }
+                memcpy(total_buf, headers->headers[i].value.iov_base, len);
+                user_conn->download_expected_bytes = strtoull(total_buf, NULL, 10);
             }
         }
 
@@ -263,17 +322,21 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && status_code >= 200 && status_code < 300
-            && user_stream->recv_body_fp == NULL) {
-            const char *download_path = user_stream->recv_file_path[0]
-                ? user_stream->recv_file_path
-                : user_conn->ctx->args->env_cfg.download_path;
+            && user_conn->download_fp == NULL) {
+            const char *download_path = user_conn->ctx->args->env_cfg.download_path;
             printf("[stats] response status: %d, download_path: %s\n",
                 status_code, download_path);
-            user_stream->recv_body_fp = fopen(download_path, "wb");
-            setvbuf(user_stream->recv_body_fp, NULL, _IOFBF, 4 * 1024 * 1024);
-            if (user_stream->recv_body_fp == NULL) {
+            user_conn->download_fp = fopen(download_path, "wb+");
+            if (user_conn->download_fp == NULL) {
                 perror("fopen");
                 return XQC_ERROR;
+            }
+            setvbuf(user_conn->download_fp, NULL, _IOFBF, 4 * 1024 * 1024);
+            strncpy(user_conn->download_path, download_path,
+                sizeof(user_conn->download_path) - 1);
+            user_conn->download_path[sizeof(user_conn->download_path) - 1] = '\0';
+            if (user_conn->download_start_time == 0) {
+                user_conn->download_start_time = xqc_now();
             }
             printf("[stats] response body will be stored in %s\n", download_path);
         }
@@ -312,26 +375,36 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         read_sum += read;
         size_t prev_len = user_stream->recv_body_len;
         user_stream->recv_body_len += read;
-        size_t cur_len = user_stream->recv_body_len;
         
-        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_stream->expected_content_length > 0) {
-             size_t step = user_stream->expected_content_length / 100; // 1%
-            if (step == 0) step = 1;
+        
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
+            user_conn->download_received_bytes += (size_t)read;
+            if (user_conn->download_expected_bytes > 0) {
+                double progress = (double)user_conn->download_received_bytes * 100.0
+                    / user_conn->download_expected_bytes;
+                if (progress > 100.0) {
+                    progress = 100.0;
+                }
+                int progress_int = (int)progress;
+                if (progress_int != user_conn->download_progress_percent) {
+                    user_conn->download_progress_percent = progress_int;
+                    printf("\r[download] %d%%", user_conn->download_progress_percent);
+                    fflush(stdout);
+                }
+            }
 
-            /* 只有跨过新的百分比档位才刷新一次 */
-            if (cur_len / step != prev_len / step) {
-                double progress = (double)cur_len * 100.0 / user_stream->expected_content_length;
-                if (progress > 100.0) progress = 100.0;
-                printf("\r[download] %.0f%%", progress);
-                fflush(stdout);
-             }
         }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_stream->recv_body_fp != NULL && read > 0) {
+            && user_conn->download_fp != NULL && read > 0) {
+            if (fseek(user_conn->download_fp, (long)(user_stream->recv_offset + prev_len),
+                    SEEK_SET) != 0) {
+                perror("fseek");
+                return XQC_ERROR;
+            }
+
             size_t written = fwrite(recv_buff, 1, (size_t)read,
-                user_stream->recv_body_fp);
+                user_conn->download_fp);
             if (written != (size_t)read) {
                 perror("fwrite");
                 return XQC_ERROR;
@@ -358,15 +431,29 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             printf("\n");
         }
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_stream->recv_body_fp != NULL) {
-            fflush(user_stream->recv_body_fp);
-            const char *download_path = user_stream->recv_file_path[0]
-                ? user_stream->recv_file_path
-                : user_conn->ctx->args->env_cfg.download_path;
-            printf("[stats] download complete, %zu bytes saved to %s\n",
-                user_stream->recv_body_len, download_path);
-            xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
-            xqc_engine_main_logic(user_conn->ctx->engine);
+            && user_conn->download_fp != NULL) {
+            user_conn->download_total_bytes += user_stream->recv_body_len;
+            user_conn->download_finished_streams++;
+            if (user_conn->download_finished_streams >= user_conn->target_requests) {
+                fflush(user_conn->download_fp);
+                xqc_usec_t download_end_time = xqc_now();
+                double duration_ms = (user_conn->download_start_time > 0)
+                    ? (download_end_time - user_conn->download_start_time) / 1000.0
+                    : 0.0;
+                double mbps = duration_ms > 0
+                    ? (user_conn->download_total_bytes * 8.0) / (duration_ms * 1000.0)
+                    : 0.0;
+                printf("[stats] multi-stream download complete, %zu bytes saved to %s\n",
+                    user_conn->download_total_bytes,
+                    user_conn->download_path[0] ? user_conn->download_path
+                                                : user_conn->ctx->args->env_cfg.download_path);
+                printf("[stats] all download streams finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
+                    user_conn->download_total_bytes, duration_ms, mbps);
+                fclose(user_conn->download_fp);
+                user_conn->download_fp = NULL;
+                xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
+                xqc_engine_main_logic(user_conn->ctx->engine);
+            }
         }
         
         
@@ -424,9 +511,6 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
             || user_conn->paths[i].consecutive_write_failures >= max_write_failures) {
             continue;
         }
-        if (fallback_path == NULL) {
-            fallback_path = &user_conn->paths[i];
-        }
         if (user_conn->paths[i].path_id == path_id) {
             user_path = &user_conn->paths[i];
             break;
@@ -434,6 +518,21 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     }
 
     if (user_path == NULL) {
+        int start = user_conn->next_fallback_path_index;
+        if (start < 0 || start >= MAX_PATH_CNT) {
+            start = 0;
+        }
+
+        for (int n = 0; n < MAX_PATH_CNT; n++) {
+            int idx = (start + n) % MAX_PATH_CNT;
+            if (!user_conn->paths[idx].is_active
+                || user_conn->paths[idx].consecutive_write_failures >= max_write_failures) {
+                continue;
+            }
+            fallback_path = &user_conn->paths[idx];
+            user_conn->next_fallback_path_index = (idx + 1) % MAX_PATH_CNT;
+            break;
+        }
         user_path = fallback_path;
     }
 
@@ -628,6 +727,29 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
     }
 
     xqc_mini_cli_try_rebuild_paths(user_conn);
+
+     if (user_conn->handshake_finished && !user_conn->requests_launched) {
+        int target_paths = user_conn->ctx->args->net_cfg.multi_interface_cnt;
+        if (target_paths <= 0) {
+            target_paths = MAX_PATH_CNT;
+        }
+        if (target_paths > MAX_PATH_CNT) {
+            target_paths = MAX_PATH_CNT;
+        }
+
+        if (user_conn->active_path_cnt >= target_paths
+            || user_conn->path_wait_rounds_after_handshake >= 2) {
+            if (user_conn->active_path_cnt < target_paths) {
+                printf("[warn] launch requests with %d/%d active paths after waiting\n",
+                    user_conn->active_path_cnt, target_paths);
+            }
+            if (xqc_mini_cli_launch_requests(user_conn) != XQC_OK) {
+                printf("[error] launch requests in path retry callback failed\n");
+            }
+        } else {
+            user_conn->path_wait_rounds_after_handshake++;
+        }
+    }
 
     tv.tv_sec = 2;
     tv.tv_usec = 0;
