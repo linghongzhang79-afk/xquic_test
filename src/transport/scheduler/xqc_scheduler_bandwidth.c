@@ -6,6 +6,12 @@
 #define XQC_BW_FILL_RATIO_NUM  9
 #define XQC_BW_FILL_RATIO_DEN  10
 
+//以下为另一个修改
+#define XQC_BW_CAP_SHIFT       10
+#define XQC_BW_BETA_NUM        13  /* 1.3x total budget */
+#define XQC_BW_BETA_DEN        10
+//以上为另一个修改
+
 typedef struct {
     xqc_bool_t  has_last_path;
     uint64_t    last_path_id;
@@ -56,6 +62,54 @@ xqc_bandwidth_scheduler_get_path_stats(xqc_path_ctx_t *path,
     }
 }
 
+static void
+xqc_bandwidth_scheduler_compute_scores(xqc_path_ctx_t **paths,
+    uint64_t *cwnd, uint64_t *inflight, uint64_t *srtt, int64_t *score, size_t count)
+{
+    if (count == 0) {
+        return;
+    }
+
+    __uint128_t sum_cwnd = 0;
+    __uint128_t sum_cap = 0;
+
+    /* cap_i = (cwnd_i << SHIFT) / srtt_i */
+    for (size_t i = 0; i < count; i++) {
+        uint64_t rtt = srtt[i] ? srtt[i] : 1;
+        sum_cwnd += cwnd[i];
+        sum_cap += (((__uint128_t)cwnd[i]) << XQC_BW_CAP_SHIFT) / rtt;
+    }
+
+    if (sum_cap == 0) {
+        /* fallback: equal cap */
+        sum_cap = count;
+    }
+
+    /* total_budget = beta * fill_ratio * sum(cwnd) */
+    __uint128_t total_budget = sum_cwnd;
+    total_budget = (total_budget * XQC_BW_FILL_RATIO_NUM) / XQC_BW_FILL_RATIO_DEN;
+    total_budget = (total_budget * XQC_BW_BETA_NUM) / XQC_BW_BETA_DEN;
+
+    for (size_t i = 0; i < count; i++) {
+        uint64_t rtt = srtt[i] ? srtt[i] : 1;
+        __uint128_t cap_i = (((__uint128_t)cwnd[i]) << XQC_BW_CAP_SHIFT) / rtt;
+        if (cap_i == 0) {
+            cap_i = 1;
+        }
+
+        /* target_i = total_budget * cap_i / sum_cap */
+        __uint128_t target_i = (total_budget * cap_i) / sum_cap;
+
+        int64_t deficit = (int64_t)target_i - (int64_t)inflight[i];
+        if (deficit <= 0) {
+            deficit = 1;
+        }
+
+        score[i] = deficit;
+    }
+}
+
+
 static xqc_path_ctx_t *
 xqc_bandwidth_scheduler_pick_path(xqc_bandwidth_scheduler_t *scheduler,
     xqc_path_ctx_t **candidates, uint64_t *available_bytes, uint64_t *srtt,int64_t  *score, size_t count,
@@ -70,6 +124,48 @@ xqc_bandwidth_scheduler_pick_path(xqc_bandwidth_scheduler_t *scheduler,
         }
         return NULL;
     }
+    //改
+    int64_t max_score = score[0];
+    for (size_t i = 1; i < count; i++) {
+        if (score[i] > max_score) {
+            max_score = score[i];
+        }
+    }
+
+    if (max_score == 0) {
+        size_t best_idx = 0;
+        uint64_t best_bytes = available_bytes[0];
+        uint64_t best_srtt = srtt[0];
+
+        for (size_t i = 1; i < count; i++) {
+            uint64_t b = available_bytes[i];
+            uint64_t r = srtt[i];
+
+            if (b > best_bytes
+                || (b == best_bytes && (r < best_srtt
+                    || (r == best_srtt
+                        && candidates[i]->path_id < candidates[best_idx]->path_id))))
+            {
+                best_idx = i;
+                best_bytes = b;
+                best_srtt = r;
+            }
+        }
+
+        if (scheduler) {
+            scheduler->last_path_id = candidates[best_idx]->path_id;
+            scheduler->has_last_path = XQC_TRUE;
+        }
+
+        if (best_available) {
+            *best_available = best_bytes;
+        }
+        if (best_score) {
+            *best_score = 0;
+        }
+        return candidates[best_idx];
+    }
+    //改
 
     size_t start = 0;
     if (scheduler && scheduler->has_last_path) {
@@ -112,9 +208,11 @@ xqc_bandwidth_scheduler_pick_path(xqc_bandwidth_scheduler_t *scheduler,
             best_srtt = candidate_srtt;
 
         } else if (candidate_score == selected_score) {
-            if (candidate_srtt < best_srtt
-                || (candidate_srtt == best_srtt
-                    && candidates[idx]->path_id < candidates[best_idx]->path_id))
+            if (candidate_bytes > selected_bytes
+                || (candidate_bytes == selected_bytes
+                    && (candidate_srtt < best_srtt
+                    || (candidate_srtt == best_srtt
+                        && candidates[idx]->path_id < candidates[best_idx]->path_id))))
             {
                 best_idx = idx;
                 selected_score = candidate_score;
@@ -151,6 +249,13 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
     uint64_t available_bytes[XQC_MAX_PATHS_COUNT];
     uint64_t available_srtt[XQC_MAX_PATHS_COUNT];
     int64_t  available_score[XQC_MAX_PATHS_COUNT];
+    //改
+    uint64_t available_cwnd[XQC_MAX_PATHS_COUNT];
+    uint64_t available_inflight[XQC_MAX_PATHS_COUNT];
+    uint64_t standby_cwnd[XQC_MAX_PATHS_COUNT];
+    uint64_t standby_inflight[XQC_MAX_PATHS_COUNT];
+    //改
+
     size_t available_cnt = 0;
 
     xqc_path_ctx_t *standby_paths[XQC_MAX_PATHS_COUNT];
@@ -167,7 +272,7 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
     uint64_t avail_bytes = 0;
     uint64_t cwnd = 0;
     uint64_t bytes_on_path = 0;
-    int64_t  score = 0;
+    //int64_t  score = 0;
     xqc_bool_t has_active_path = XQC_FALSE;
     xqc_bool_t has_sendable_path = XQC_FALSE;
 
@@ -207,19 +312,23 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
          *   need = target_inflight - bytes_on_path
          *   score = need / srtt
          */
-        uint64_t target = (cwnd * XQC_BW_FILL_RATIO_NUM) / XQC_BW_FILL_RATIO_DEN;
-        int64_t need = (int64_t)target - (int64_t)bytes_on_path;
-        if (need <= 0) {
-            need = 1; /* still eligible, but low priority */
-        }
-        score = (need << 10) / (int64_t)path_srtt;
+        //去掉原来的score算法
+        // uint64_t target = (cwnd * XQC_BW_FILL_RATIO_NUM) / XQC_BW_FILL_RATIO_DEN;
+        // int64_t need = (int64_t)target - (int64_t)bytes_on_path;
+        // if (need <= 0) {
+        //     need = 1; /* still eligible, but low priority */
+        // }
+        // score = (need << 10) / (int64_t)path_srtt;
+        //去掉原来的score算法
 
         if (path->app_path_status == XQC_APP_PATH_STATUS_AVAILABLE) {
             if (available_cnt < XQC_MAX_PATHS_COUNT) {
                 available_paths[available_cnt] = path;
                 available_bytes[available_cnt] = avail_bytes;
                 available_srtt[available_cnt] = path_srtt;
-                available_score[available_cnt] = score;
+                available_cwnd[available_cnt] = cwnd;
+                available_inflight[available_cnt] = bytes_on_path;
+                //available_score[available_cnt] = score;
                 available_cnt++;
             }
 
@@ -228,7 +337,9 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
                 standby_paths[standby_cnt] = path;
                 standby_bytes[standby_cnt] = avail_bytes;
                 standby_srtt[standby_cnt] = path_srtt;
-                standby_score[standby_cnt] = score;
+                standby_cwnd[standby_cnt] = cwnd;
+                standby_inflight[standby_cnt] = bytes_on_path;
+                //standby_score[standby_cnt] = score;
                 standby_cnt++;
             }
         }
@@ -242,6 +353,13 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
         /* blocked iff there is at least one active path, but none is sendable */
         *cc_blocked = (has_active_path && !has_sendable_path) ? XQC_TRUE : XQC_FALSE;
     }
+
+    //改算法
+    xqc_bandwidth_scheduler_compute_scores(available_paths,
+        available_cwnd, available_inflight, available_srtt, available_score, available_cnt);
+    xqc_bandwidth_scheduler_compute_scores(standby_paths,
+        standby_cwnd, standby_inflight, standby_srtt, standby_score, standby_cnt);
+    //改算法
 
     xqc_path_ctx_t *best_path = NULL;
     uint64_t best_available = 0;
