@@ -107,7 +107,7 @@ xqc_mini_cli_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_
 {
     xqc_mini_cli_ctx_t *ctx = (xqc_mini_cli_ctx_t*)engine_user_data;
     if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+        zlog_info(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         return;
     }
 
@@ -727,6 +727,19 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
     }
 
     xqc_mini_cli_try_rebuild_paths(user_conn);
+
+     if (user_conn->handshake_finished
+        && user_conn->requests_launched
+        && user_conn->active_path_cnt > 1)
+    {
+        xqc_int_t ping_ret = xqc_h3_conn_send_ping(user_conn->ctx->engine,
+                                                   &user_conn->cid, NULL);
+        if (ping_ret != XQC_OK) {
+            printf("[warn] periodic mp ping failed, ret=%d\n", ping_ret);
+        }
+    }
+
+
 
      if (user_conn->handshake_finished && !user_conn->requests_launched) {
         int target_paths = user_conn->ctx->args->net_cfg.multi_interface_cnt;
