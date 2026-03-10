@@ -17,7 +17,7 @@ static void xqc_mini_cli_dump_path_bindings(xqc_mini_cli_user_conn_t *user_conn)
 static int xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn,
     xqc_mini_cli_user_path_t *path);
 static xqc_mini_cli_user_path_t *xqc_mini_cli_find_inactive_path(xqc_mini_cli_user_conn_t *user_conn);
-
+static int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
 static int xqc_mini_cli_bind_to_interface(int fd, const char *interface_name, int family);
 static int xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path);
 static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen,
@@ -133,7 +133,6 @@ xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
     } else {
     /* disable log/keylog output for the mini server */
         callback.log_callbacks = (xqc_log_callbacks_t){0};
-        //callback.log_callbacks.xqc_qlog_event_write = xqc_mini_cli_write_qlog_file;
         callback.keylog_cb = NULL;
     }
     static xqc_transport_callbacks_t transport_cbs = {
@@ -268,7 +267,7 @@ xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
     ctx->args = args;
 
     // /* init log writer fd */
-    // ctx->log_fd = xqc_mini_cli_open_log_file(ctx);
+    //ctx->log_fd = xqc_mini_cli_open_log_file(ctx);
     // if (ctx->log_fd < 0) {
     //     printf("[error] open log file failed\n");
     //     return XQC_ERROR;
@@ -388,25 +387,19 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->spurious_loss_detect_on = 1;
     settings->scheduler_callback = sched;
     settings->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
-
-    // settings->adaptive_ack_frequency = 1;
-    //settings->mp_ack_on_any_path = 1;
-    settings->adaptive_ack_frequency = 0;
-    settings->ack_frequency = 1;
-    settings->max_ack_delay = 5;
-    settings->loss_detection_pkt_thresh = 4;
-    settings->pto_backoff_factor = 2.5;
-    settings->mp_ack_on_any_path = 0;
-
+    settings->adaptive_ack_frequency = 1;
+    // settings->ack_frequency = 4;      
+    // settings->max_ack_delay = 5;
+    settings->mp_ack_on_any_path = 1;
 
     settings->enable_multipath = args->quic_cfg.multipath;
-    //settings->enable_stream_rate_limit = 1;
+    settings->enable_stream_rate_limit = 1;
     settings->init_recv_window = 512*1024*1024;
     settings->multipath_version = XQC_MULTIPATH_10;
     settings->recv_rate_bytes_per_sec = 0;
     settings->max_datagram_frame_size = 1350;
-    settings->mp_ping_on = 1;
-    settings->mp_enable_reinjection = 1;
+    //settings->pacing_on = 1;
+    //settings->mp_enable_reinjection = 1;
 }
 // 初始化 HTTP3 回调与上下文
 int
@@ -797,8 +790,15 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
 
 
     if (req_cfg->method == REQUEST_METHOD_GET) {
-        user_stream->recv_offset = user_stream->chunk_offset;
-        user_stream->recv_file_path[0] = '\0';
+        const char *base_path = user_conn->ctx->args->env_cfg.download_path;
+        if (user_conn->ctx->args->req_stream_cnt > 1) {
+            snprintf(user_stream->recv_file_path, sizeof(user_stream->recv_file_path),
+                "%s.part%d", base_path, stream_index);
+        } else {
+            strncpy(user_stream->recv_file_path, base_path,
+                sizeof(user_stream->recv_file_path) - 1);
+            user_stream->recv_file_path[sizeof(user_stream->recv_file_path) - 1] = '\0';
+        }
     }
     
 
@@ -866,7 +866,7 @@ xqc_mini_cli_get_interface_for_path(xqc_mini_cli_user_conn_t *user_conn, int pat
     return net_cfg->multi_interface[path_index];
 }
 // 计算期望创建的路径数量
-int
+static int
 xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn)
 {
 
@@ -1665,13 +1665,7 @@ xqc_mini_cli_create_new_path(xqc_mini_cli_user_conn_t *user_conn)
     uint64_t new_path_id = 0;
     int ret = xqc_conn_create_path(user_conn->ctx->engine, &user_conn->cid, &new_path_id, 0);
     if (ret != XQC_OK) {
-        if (ret == -XQC_EMP_NO_AVAIL_PATH_ID) {
-            printf("[warn] xqc_conn_create_path delayed: no available path id yet, will retry\n");
-        } else if (ret == -XQC_EMP_NOT_SUPPORT_MP) {
-            printf("[warn] xqc_conn_create_path skipped: multipath not ready, will retry\n");
-        } else {
-            printf("[error] xqc_conn_create_path error:%d\n", ret);
-        }
+        printf("[error] xqc_conn_create_path error:%d\n", ret);
         return ret;
     }
     if (!path->prepared) {
@@ -1756,11 +1750,7 @@ xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn)
     // printf("[stats] try to rebuild paths, current cnt: %d, target cnt: %d\n",
     //     user_conn->active_path_cnt, target_cnt);
     while (user_conn->active_path_cnt < target_cnt) {
-        int ret = xqc_mini_cli_create_new_path(user_conn);
-        if (ret != XQC_OK) {
-            if (ret == -XQC_EMP_NO_AVAIL_PATH_ID || ret == -XQC_EMP_NOT_SUPPORT_MP) {
-                /* multipath control frames/cids are not ready yet, wait for periodic retry */
-            }
+        if (xqc_mini_cli_create_new_path(user_conn) != XQC_OK) {
             break;
         }
     }
@@ -1768,23 +1758,19 @@ xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn)
 
 // 客户端主流程：创建连接并发起请求
 int
-xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn)
+xqc_mini_cli_main_process(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_ctx_t *ctx)
 {
     int ret;
-    if (user_conn == NULL || user_conn->ctx == NULL) {
+    xqc_mini_cli_args_t *args;
+
+    user_conn->ctx = ctx;
+    args = ctx->args;
+
+    ret = xqc_mini_cli_init_xquic_connection(user_conn);
+    if (ret < 0) {
+        printf("[error] mini socket init xquic connection failed\n");
         return XQC_ERROR;
     }
-    if (user_conn->requests_launched) {
-        return XQC_OK;
-    }
-
-    /*
-     * For short flows (e.g. mini GET), proactively trigger multipath
-     * creation before request streams are launched, instead of only relying
-     * on ready_to_create_path_notify timing.
-     */
-    
-
 
     int stream_total = user_conn->target_requests;
     printf("[stats] launch %d concurrent request streams\n", stream_total);
@@ -1805,25 +1791,6 @@ xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn)
             return XQC_ERROR;
         }
     }
-    user_conn->requests_launched = 1;
-    return XQC_OK;
-}
-int
-xqc_mini_cli_main_process(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_ctx_t *ctx)
-{
-    int ret;
-    xqc_mini_cli_args_t *args;
-
-    user_conn->ctx = ctx;
-    args = ctx->args;
-
-    ret = xqc_mini_cli_init_xquic_connection(user_conn);
-    if (ret < 0) {
-        printf("[error] mini socket init xquic connection failed\n");
-        return XQC_ERROR;
-    }
-
-    printf("[stats] requests are deferred until handshake/path readiness\n");
 
     return XQC_OK;
 }
@@ -1860,7 +1827,6 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     xqc_mini_cli_user_path_t *path0 = &user_conn->paths[0];
     
     ret = xqc_mini_cli_init_user_path(user_conn, path0, 0);
-    
     // printf("path_id: %"PRIu64", address_path: %s,peer_address:%s\n",
     //            path0->path_id,inet_ntoa(((struct sockaddr_in*)path0->local_addr)->sin_addr),inet_ntoa(((struct sockaddr_in*)path0->peer_addr)->sin_addr));
     if (ret < 0) {
@@ -1875,18 +1841,6 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->upload_start_time = 0;
     user_conn->upload_finished_streams = 0;
     user_conn->upload_total_bytes = 0;
-    user_conn->download_fp = NULL;
-    user_conn->download_path[0] = '\0';
-    user_conn->download_total_bytes = 0;
-    user_conn->download_expected_bytes = 0;
-    user_conn->download_received_bytes = 0;
-    user_conn->download_progress_percent = -1;
-    user_conn->download_finished_streams = 0;
-    user_conn->download_start_time = 0;
-    user_conn->next_fallback_path_index = 0;
-    user_conn->handshake_finished = 0;
-    user_conn->requests_launched = 0;
-    user_conn->path_wait_rounds_after_handshake = 0;
 
    
     memset(user_conn->send_file_path, 0, sizeof(user_conn->send_file_path));
@@ -1965,7 +1919,6 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     for (int i = 1; i < target_prepare; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         ret = xqc_mini_cli_prepare_user_path(user_conn, path);
-        //ret = xqc_mini_cli_init_user_path(user_conn, path, i);
         if (ret != XQC_OK) {
             printf("[warn] pre-bind for path[%d] failed, ret:%d\n", i, ret);
         }
@@ -1983,11 +1936,6 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
     if (user_conn == NULL) {
         return;
     }
-    if (user_conn->download_fp) {
-        fclose(user_conn->download_fp);
-        user_conn->download_fp = NULL;
-    }
-
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         if (path->ev_socket) {
@@ -2243,6 +2191,11 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
         default:
             break;
         }
+    }
+    if (args->req_cfg.method == REQUEST_METHOD_GET
+        && args->req_stream_cnt != 1) {
+        printf("[warn] GET only supports a single request stream, clamp to 1\n");
+        args->req_stream_cnt = 1;
     }
     return XQC_OK;
 }

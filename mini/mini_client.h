@@ -189,7 +189,7 @@ typedef struct xqc_mini_cli_args_s {
 typedef struct xqc_mini_cli_ctx_s {
     struct event_base   *eb;
 
-    xqc_mini_cli_args_t *args;      // client arguments for current context
+    xqc_mini_cli_args_t *args;      // server arguments for current context
 
     xqc_engine_t        *engine;    // xquic engine for current context
     struct event        *ev_engine;
@@ -240,21 +240,6 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     upload_finished_streams;
     size_t                  upload_total_bytes;
 
-    FILE                   *download_fp;
-    char                    download_path[PATH_LEN];
-    size_t                  download_total_bytes;
-    size_t                  download_expected_bytes;
-    size_t                  download_received_bytes;
-    int                     download_progress_percent;
-    int                     download_finished_streams;
-    xqc_msec_t              download_start_time;
-
-    int                     next_fallback_path_index;
-    int                     handshake_finished;
-    int                     requests_launched;
-    int                     path_wait_rounds_after_handshake;
-
-
 
     struct event            *ev_timeout;
     struct event            *ev_path_retry;
@@ -274,7 +259,6 @@ typedef struct xqc_mini_cli_user_stream_s {
     size_t                 buffered_len;
     size_t                 buffered_sent;
     size_t                 chunk_offset;
-    size_t                 recv_offset;
     
 
     /* stat for IO */
@@ -361,8 +345,4 @@ void xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn);
 void xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn);
 
 int xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[]);
-
-int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
-
-int xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn);
 #endif
