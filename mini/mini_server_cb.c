@@ -441,8 +441,8 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *ou
     }
     fclose(fp);
 
-    printf("[server] prepared output file '%s' for %d streams totaling %zu bytes\n",
-        output_file, stream_count, total_size);
+    printf("[server] prepared output file '%s' for totaling %zu bytes\n",
+        output_file, total_size);
 }
 static void
 xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
